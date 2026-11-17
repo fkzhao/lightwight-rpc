@@ -34,6 +34,31 @@ The builder adds named settings for response timeout, per-dial connect timeout, 
 
 `RpcServer.register(RpcMethodDescriptor, handler)` remains the server entry point. The server continues to run application handlers on its bounded worker pool and echo the request ID in each response. An optional server builder can replace positional constructors without changing the handler contract.
 
+## Server handler discovery
+
+The server supports two registration modes. The existing `register(...)` and `registerWithContext(...)` calls stay available for explicit registration. The new `scanAndRegister(AnchorClass.class)` mode searches the anchor class's package and its subpackages for annotated handlers, then registers them before `start()` binds the port. Passing an anchor class avoids guessing the caller's package from a stack trace or scanning the entire classpath.
+
+Proposed scanned handler:
+
+```java
+// EchoRpc.ECHO_ID is a public static final long constant shared with the client descriptor.
+@RpcService
+public final class EchoService {
+    @RpcRoute(methodId = EchoRpc.ECHO_ID)
+    public EchoResponse echo(EchoRequest request, RpcContext context) {
+        return EchoResponse.newBuilder().setMessage(request.getMessage()).build();
+    }
+}
+
+RpcServer server = new RpcServer(address, "echo-server", 8, maxBodyLength);
+server.scanAndRegister(EchoServerMain.class); // Includes its package and subpackages.
+server.start();
+```
+
+`@RpcRoute` accepts a compile-time method ID constant, so the server annotation and client `RpcMethodDescriptor` can share one ID definition. The scanner accepts public methods returning a protobuf `Message` with either `(Req)` or `(Req, RpcContext)` parameters, where `Req` is a generated protobuf message. It obtains the request parser from `Req.parser()` during registration. Handlers execute on the existing server worker pool. Public static methods need no instance; public instance methods use a public no-argument constructor by default. An optional instance factory lets dependency-injection containers provide handler objects.
+
+Scanning happens once at startup. The SDK resolves the parser and binds a callable handler adapter then; no package scan or method lookup occurs on a request path. Classes are discovered in a deterministic order. Duplicate method IDs, unsupported signatures, inaccessible handlers, and parser failures abort startup with a descriptive error before the server binds. Explicit and scanned registrations may coexist when their method IDs differ. The scanner must work with both class directories and packaged JARs; packaging-specific cases are covered by integration tests.
+
 ## Internal components
 
 ```mermaid
@@ -80,8 +105,9 @@ The response timeout starts after a call is sent. A call accepted while disconne
 
 1. Add `RpcClientPool` with a builder, readiness/state APIs, a bounded unsent-call queue, and connection supervision. Preserve the existing `RpcClient` API and its fail-fast behavior using shared lower-level transport components.
 2. Add configurable connection and I/O thread counts, reconnect failure threshold, and completion executor. Keep the default at one connection.
-3. Update `rpc-example` so its long-connection and multiplexing examples only configure and call the SDK; neither example contains transport logic.
-4. Verify out-of-order responses on one TCP connection, concurrent calls, heartbeat, reconnect after server restart, queued calls sent once after reconnect, threshold failure and later recovery, failure of in-flight calls on disconnect, both timeout types, late responses, cancellation, both capacity limits, and clean shutdown.
-5. Repeat the separate-JVM benchmark under the same conditions recorded in `rpc-benchmark/RESULTS.md`. Investigate a material throughput or latency regression before replacing the current client implementation.
+3. Add `@RpcService`, `@RpcRoute`, and `scanAndRegister(...)` as an optional server registration mode. Update the Echo example to show both manual and scanned registration.
+4. Update `rpc-example` so its long-connection and multiplexing clients only configure and call the SDK; neither example contains transport logic.
+5. Verify out-of-order responses on one TCP connection, concurrent calls, heartbeat, reconnect after server restart, queued calls sent once after reconnect, threshold failure and later recovery, failure of in-flight calls on disconnect, both timeout types, late responses, cancellation, both capacity limits, and clean shutdown. Verify scan boundaries, JAR packaging, duplicate IDs, invalid signatures, and mixed manual/scanned registration.
+6. Repeat the separate-JVM benchmark under the same conditions recorded in `rpc-benchmark/RESULTS.md`. Investigate a material throughput or latency regression before replacing the current client implementation.
 
 The principal design choices for review are the `RpcClientPool` name, one connection by default, three failed reconnect cycles before queued calls fail, immediate failure of new calls while the pool is `UNAVAILABLE`, and continued background reconnect so a recovered server can accept later calls.
