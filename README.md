@@ -83,6 +83,29 @@ server.register(1, EchoRequest.parser(), request ->
 
 Use `RpcClient.request(methodId, logId, request, responseParser)` to invoke the method. The returned `CompletableFuture` allows multiple outstanding calls over one connection. The client correlates replies by the 64-bit `request_id` in the response header before parsing the response protobuf, so responses may arrive out of order. The nshead `log_id` remains a caller-supplied trace ID.
 
+## Long-lived connections
+
+`RpcClient.connect(...)` establishes the first TCP connection synchronously and then reconnects automatically if it is lost. `RpcClient.open(...)` returns immediately and also retries when the server is unavailable at startup. Use `isConnected()` to check availability; new requests fail fast while disconnected. A request that was in flight when a connection failed completes exceptionally because the server may already have processed it. The client never replays it automatically.
+
+| Setting | Default |
+| --- | ---: |
+| TCP connect timeout | 3 seconds |
+| Client read idle before PING | 30 seconds |
+| PONG timeout | 10 seconds |
+| Server read idle before closing | 90 seconds |
+| Reconnect delay | 500 ms initially, exponential up to 30 seconds, with jitter |
+| RPC request timeout | Supplied as `timeoutMillis` when creating the client |
+
+PING uses `method_id=0`, PONG uses `method_id=0xFFFFFFFF`, and both have an empty body. The server replies to PING on its network thread and echoes the 64-bit header request ID. These method IDs cannot be registered as business methods. TCP keepalive is also enabled. Configure client timeouts with `RpcClientConfig`; the server's optional fifth constructor argument sets its read idle timeout in milliseconds.
+
+To observe reconnection, run `EchoServerMain` and keep this client running in another terminal:
+
+```bash
+mvn compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.LongConnectionClientMain
+```
+
+Stop and restart the Echo server. The client logs disconnection and reconnect attempts, then resumes new calls on the new TCP connection. Calls interrupted by the disconnect fail and are not replayed.
+
 ## Protocol definition
 
 The first 36 bytes follow the field sizes used by the Baidu nshead header. The 8-byte request ID extension, method ID, and response envelope are custom conventions for this RPC framework.

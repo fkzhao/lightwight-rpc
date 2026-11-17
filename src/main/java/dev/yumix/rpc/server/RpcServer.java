@@ -14,7 +14,13 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.channel.group.ChannelGroup;
+import io.netty.channel.group.DefaultChannelGroup;
+import io.netty.handler.timeout.IdleState;
+import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.concurrent.DefaultThreadFactory;
+import io.netty.util.concurrent.GlobalEventExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,6 +30,8 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Netty based nshead + protobuf RPC server. Register methods before start(). */
 public final class RpcServer implements AutoCloseable {
@@ -35,21 +43,31 @@ public final class RpcServer implements AutoCloseable {
     private final InetSocketAddress address;
     private final String provider;
     private final int maxBodyLength;
+    private final long readIdleMillis;
     private final EventLoopGroup boss = new NioEventLoopGroup(1, new DefaultThreadFactory("rpc-accept"));
     private final EventLoopGroup ioGroup = new NioEventLoopGroup(0, new DefaultThreadFactory("rpc-io"));
     private final ExecutorService workers;
+    private final ChannelGroup connections = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
+    private final AtomicBoolean closed = new AtomicBoolean();
     private final Map<Long, RegisteredMethod<?, ?>> methods = new ConcurrentHashMap<>();
     private volatile Channel serverChannel;
 
     public RpcServer(InetSocketAddress address, String provider, int workerThreads, int maxBodyLength) {
+        this(address, provider, workerThreads, maxBodyLength, 90_000);
+    }
+
+    public RpcServer(InetSocketAddress address, String provider, int workerThreads,
+                     int maxBodyLength, long readIdleMillis) {
         this.address = Objects.requireNonNull(address, "address");
         this.provider = Objects.requireNonNull(provider, "provider");
         if (workerThreads < 1) throw new IllegalArgumentException("workerThreads must be positive");
         if (maxBodyLength < 0) throw new IllegalArgumentException("maxBodyLength must be non-negative");
+        if (readIdleMillis < 1) throw new IllegalArgumentException("readIdleMillis must be positive");
         if (provider.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 16) {
             throw new IllegalArgumentException("provider must be at most 16 UTF-8 bytes");
         }
         this.maxBodyLength = maxBodyLength;
+        this.readIdleMillis = readIdleMillis;
         this.workers = Executors.newFixedThreadPool(workerThreads, new DefaultThreadFactory("rpc-worker"));
     }
 
@@ -61,7 +79,9 @@ public final class RpcServer implements AutoCloseable {
 
     public <Req extends Message, Resp extends Message> RpcServer registerWithContext(
             long methodId, Parser<Req> requestParser, RpcMethodWithContext<Req, Resp> method) {
-        if ((methodId & ~0xffff_ffffL) != 0) throw new IllegalArgumentException("methodId must fit in uint32");
+        if (methodId <= NsHeadFrame.PING_METHOD_ID || methodId >= NsHeadFrame.PONG_METHOD_ID) {
+            throw new IllegalArgumentException("methodId is reserved for heartbeat control frames");
+        }
         RegisteredMethod<Req, Resp> registered = new RegisteredMethod<>(
                 Objects.requireNonNull(requestParser, "requestParser"), Objects.requireNonNull(method, "method"));
         if (methods.putIfAbsent(methodId, registered) != null) {
@@ -71,17 +91,21 @@ public final class RpcServer implements AutoCloseable {
     }
 
     public RpcServer start() {
+        if (closed.get()) throw new IllegalStateException("server is closed");
         if (serverChannel != null) throw new IllegalStateException("server already started");
         ServerBootstrap bootstrap = new ServerBootstrap()
                 .group(boss, ioGroup)
                 .channel(NioServerSocketChannel.class)
                 .option(ChannelOption.SO_REUSEADDR, true)
                 .childOption(ChannelOption.TCP_NODELAY, true)
+                .childOption(ChannelOption.SO_KEEPALIVE, true)
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel channel) {
+                        connections.add(channel);
                         channel.pipeline().addLast(new NsHeadFrameDecoder(maxBodyLength));
                         channel.pipeline().addLast(new NsHeadFrameEncoder());
+                        channel.pipeline().addLast(new IdleStateHandler(readIdleMillis, 0, 0, TimeUnit.MILLISECONDS));
                         channel.pipeline().addLast(new RequestHandler());
                     }
                 });
@@ -104,14 +128,27 @@ public final class RpcServer implements AutoCloseable {
 
     @Override
     public void close() {
+        if (!closed.compareAndSet(false, true)) return;
         Channel current = serverChannel;
         if (current != null) current.close().syncUninterruptibly();
+        connections.close().awaitUninterruptibly();
         workers.shutdownNow();
         boss.shutdownGracefully().syncUninterruptibly();
         ioGroup.shutdownGracefully().syncUninterruptibly();
     }
 
     private final class RequestHandler extends io.netty.channel.SimpleChannelInboundHandler<NsHeadFrame> {
+        @Override
+        public void userEventTriggered(io.netty.channel.ChannelHandlerContext ctx, Object event) {
+            if (event instanceof IdleStateEvent idle && idle.state() == IdleState.READER_IDLE) {
+                LOG.info("RPC connection idle; closing connection={} remote={}",
+                        ctx.channel().id().asShortText(), ctx.channel().remoteAddress());
+                ctx.close();
+                return;
+            }
+            ctx.fireUserEventTriggered(event);
+        }
+
         @Override
         public void channelActive(io.netty.channel.ChannelHandlerContext ctx) {
             LOG.info("RPC connection opened connection={} local={} remote={}",
@@ -128,6 +165,23 @@ public final class RpcServer implements AutoCloseable {
 
         @Override
         protected void channelRead0(io.netty.channel.ChannelHandlerContext ctx, NsHeadFrame header) {
+            if (header.methodId() == NsHeadFrame.PING_METHOD_ID) {
+                if (header.body().length != 0) {
+                    LOG.warn("Invalid heartbeat body connection={}", ctx.channel().id().asShortText());
+                    ctx.close();
+                    return;
+                }
+                ctx.writeAndFlush(new NsHeadFrame(header.id(), NsHeadFrame.PROTOCOL_VERSION,
+                        header.logId(), provider, NsHeadFrame.PONG_METHOD_ID, header.requestId(), new byte[0]));
+                LOG.debug("RPC heartbeat pong connection={} requestId={}",
+                        ctx.channel().id().asShortText(), Long.toUnsignedString(header.requestId()));
+                return;
+            }
+            if (header.methodId() == NsHeadFrame.PONG_METHOD_ID) {
+                LOG.warn("Unexpected heartbeat pong from client connection={}", ctx.channel().id().asShortText());
+                ctx.close();
+                return;
+            }
             long startedAt = System.nanoTime();
             String requestId = Long.toUnsignedString(header.requestId());
             String connectionId = ctx.channel().id().asShortText();

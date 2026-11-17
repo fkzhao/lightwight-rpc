@@ -9,6 +9,8 @@ public record NsHeadFrame(int id, int version, long logId, String provider,
     public static final int HEADER_LENGTH = 44;
     public static final int MAGIC = 0xfb709394;
     public static final int PROTOCOL_VERSION = 3;
+    public static final long PING_METHOD_ID = 0;
+    public static final long PONG_METHOD_ID = 0xffff_ffffL;
 
     public NsHeadFrame {
         if ((id & ~0xffff) != 0) throw new IllegalArgumentException("id must fit in uint16");
