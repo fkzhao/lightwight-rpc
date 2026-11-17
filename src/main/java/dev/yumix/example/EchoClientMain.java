@@ -1,8 +1,8 @@
-package io.github.fkzhao.lightweightrpc.example;
+package dev.yumix.example;
 
-import io.github.fkzhao.lightweightrpc.client.RpcClient;
-import io.github.fkzhao.lightweightrpc.example.proto.EchoRequest;
-import io.github.fkzhao.lightweightrpc.example.proto.EchoResponse;
+import dev.yumix.client.RpcClient;
+import dev.yumix.example.proto.EchoRequest;
+import dev.yumix.example.proto.EchoResponse;
 
 import java.net.InetSocketAddress;
 import java.util.concurrent.TimeUnit;

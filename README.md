@@ -2,6 +2,8 @@
 
 A small Java 17 RPC framework using Netty, a 36-byte nshead-style header, and Protocol Buffers payloads. It includes a multiplexed asynchronous client, a server with a worker pool, and an Echo example.
 
+The Java base package and Maven group ID are `dev.yumix`.
+
 ## Requirements
 
 - JDK 17
@@ -20,13 +22,13 @@ Protocol Buffer Java sources are generated from `src/main/proto` during the Mave
 Start the server:
 
 ```bash
-mvn exec:java -Dexec.mainClass=io.github.fkzhao.lightweightrpc.example.EchoServerMain
+mvn exec:java -Dexec.mainClass=dev.yumix.example.EchoServerMain
 ```
 
 Call it from another terminal:
 
 ```bash
-mvn exec:java -Dexec.mainClass=io.github.fkzhao.lightweightrpc.example.EchoClientMain -Dexec.args="127.0.0.1 9000 hello"
+mvn exec:java -Dexec.mainClass=dev.yumix.example.EchoClientMain -Dexec.args="127.0.0.1 9000 hello"
 ```
 
 ## Wire protocol

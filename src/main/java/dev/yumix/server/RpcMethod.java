@@ -1,4 +1,4 @@
-package io.github.fkzhao.lightweightrpc.server;
+package dev.yumix.server;
 
 import com.google.protobuf.Message;
 

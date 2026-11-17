@@ -1,4 +1,4 @@
-package io.github.fkzhao.lightweightrpc.client;
+package dev.yumix.client;
 
 public final class RpcException extends RuntimeException {
     private final long errorCode;

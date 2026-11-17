@@ -1,4 +1,4 @@
-package io.github.fkzhao.lightweightrpc.protocol;
+package dev.yumix.protocol;
 
 import java.util.Objects;
 
