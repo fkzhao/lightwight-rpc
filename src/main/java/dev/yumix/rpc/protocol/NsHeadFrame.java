@@ -1,4 +1,4 @@
-package dev.yumix.protocol;
+package dev.yumix.rpc.protocol;
 
 import java.util.Objects;
 

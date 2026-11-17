@@ -1,4 +1,4 @@
-package dev.yumix.server;
+package dev.yumix.rpc.server;
 
 import com.google.protobuf.Message;
 

@@ -1,8 +1,8 @@
-package dev.yumix.example;
+package dev.yumix.rpc.example;
 
-import dev.yumix.client.RpcClient;
-import dev.yumix.example.proto.EchoRequest;
-import dev.yumix.example.proto.EchoResponse;
+import dev.yumix.rpc.client.RpcClient;
+import dev.yumix.rpc.example.proto.EchoRequest;
+import dev.yumix.rpc.example.proto.EchoResponse;
 
 import java.net.InetSocketAddress;
 import java.util.concurrent.TimeUnit;

@@ -1,11 +1,11 @@
-package dev.yumix.server;
+package dev.yumix.rpc.server;
 
 import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
-import dev.yumix.protocol.NsHeadFrame;
-import dev.yumix.protocol.NsHeadFrameDecoder;
-import dev.yumix.protocol.NsHeadFrameEncoder;
-import dev.yumix.protocol.RpcResponse;
+import dev.yumix.rpc.protocol.NsHeadFrame;
+import dev.yumix.rpc.protocol.NsHeadFrameDecoder;
+import dev.yumix.rpc.protocol.NsHeadFrameEncoder;
+import dev.yumix.rpc.protocol.RpcResponse;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
