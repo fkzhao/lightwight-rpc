@@ -7,6 +7,7 @@ option java_multiple_files = true;
 
 message EchoRequest {
   string message = 1;
+  uint32 delay_ms = 2;
 }
 
 message EchoResponse {

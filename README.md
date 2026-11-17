@@ -31,6 +31,16 @@ Call it from another terminal:
 mvn exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoClientMain -Dexec.args="127.0.0.1 9080 hello"
 ```
 
+## Observe multiplexing on one TCP connection
+
+Run the standalone demo:
+
+```bash
+mvn -q compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingDemoMain
+```
+
+The demo opens one real TCP connection on a loopback port and sends four requests immediately. Each `SEND` and `RECV` line prints the same client and server socket addresses. The server prints the same Netty connection ID for every request, along with a distinct 64-bit request ID. The requests have different delays, so the completion order differs from the send order.
+
 ## Wire protocol
 
 Each TCP frame contains the following header followed by the body. All integer fields are unsigned and little-endian. The body length is limited by each endpoint's configured `maxBodyLength`.

@@ -53,8 +53,15 @@ public final class RpcServer implements AutoCloseable {
 
     public <Req extends Message, Resp extends Message> RpcServer register(
             long methodId, Parser<Req> requestParser, RpcMethod<Req, Resp> method) {
+        Objects.requireNonNull(method, "method");
+        return registerWithContext(methodId, requestParser, (request, context) -> method.handle(request));
+    }
+
+    public <Req extends Message, Resp extends Message> RpcServer registerWithContext(
+            long methodId, Parser<Req> requestParser, RpcMethodWithContext<Req, Resp> method) {
         if ((methodId & ~0xffff_ffffL) != 0) throw new IllegalArgumentException("methodId must fit in uint32");
-        RegisteredMethod<Req, Resp> registered = new RegisteredMethod<>(requestParser, method);
+        RegisteredMethod<Req, Resp> registered = new RegisteredMethod<>(
+                Objects.requireNonNull(requestParser, "requestParser"), Objects.requireNonNull(method, "method"));
         if (methods.putIfAbsent(methodId, registered) != null) {
             throw new IllegalArgumentException("methodId already registered: " + methodId);
         }
@@ -125,10 +132,12 @@ public final class RpcServer implements AutoCloseable {
                         ERROR_METHOD_NOT_FOUND, "Unknown methodId: " + header.methodId());
                 return;
             }
+            RpcContext rpcContext = new RpcContext(request.getRequestId(), ctx.channel().id().asShortText(),
+                    ctx.channel().localAddress(), ctx.channel().remoteAddress());
             try {
                 workers.execute(() -> {
                     try {
-                        Message response = method.invoke(request.getPayload().toByteArray());
+                        Message response = method.invoke(request.getPayload().toByteArray(), rpcContext);
                         respond(ctx, header, request.getRequestId(), response, 0, "");
                     } catch (Exception e) {
                         respond(ctx, header, request.getRequestId(), null,
@@ -166,10 +175,10 @@ public final class RpcServer implements AutoCloseable {
     }
 
     private record RegisteredMethod<Req extends Message, Resp extends Message>(
-            Parser<Req> parser, RpcMethod<Req, Resp> method) {
-        private Message invoke(byte[] body) throws Exception {
+            Parser<Req> parser, RpcMethodWithContext<Req, Resp> method) {
+        private Message invoke(byte[] body, RpcContext context) throws Exception {
             Req request = parser.parseFrom(body);
-            return method.handle(request);
+            return method.handle(request, context);
         }
     }
 }

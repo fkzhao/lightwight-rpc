@@ -20,6 +20,7 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
 
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -115,6 +116,10 @@ public final class RpcClient implements AutoCloseable {
             if (pending.putIfAbsent(requestId, call) == null) return call;
         }
     }
+
+    public SocketAddress localAddress() { return channel.localAddress(); }
+
+    public SocketAddress remoteAddress() { return channel.remoteAddress(); }
 
     @Override
     public void close() {
