@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package lightweight.rpc;
+
+option java_package = "io.github.fkzhao.lightweightrpc.protocol";
+option java_multiple_files = true;
+
+// Every successful response carries the serialized method response in payload.
+// Errors use a non-zero code and a human-readable message.
+message RpcResponse {
+  bytes payload = 1;
+  uint32 error_code = 2;
+  string error_message = 3;
+}

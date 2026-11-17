@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>io.github.fkzhao</groupId>
+  <artifactId>lightweight-rpc</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <name>lightweight-rpc</name>
+  <description>Small nshead + Protobuf RPC framework for Java 17</description>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <netty.version>4.1.118.Final</netty.version>
+    <protobuf.version>4.29.3</protobuf.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>io.netty</groupId><artifactId>netty-transport</artifactId><version>${netty.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId><artifactId>netty-codec</artifactId><version>${netty.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId><artifactId>netty-handler</artifactId><version>${netty.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.google.protobuf</groupId><artifactId>protobuf-java</artifactId><version>${protobuf.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>2.0.16</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId><artifactId>slf4j-simple</artifactId><version>2.0.16</version><scope>runtime</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <extensions>
+      <extension><groupId>kr.motd.maven</groupId><artifactId>os-maven-plugin</artifactId><version>1.7.1</version></extension>
+    </extensions>
+    <plugins>
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId><artifactId>protobuf-maven-plugin</artifactId><version>0.6.1</version>
+        <configuration>
+          <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+        </configuration>
+        <executions><execution><goals><goal>compile</goal><goal>test-compile</goal></goals></execution></executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version>
+        <configuration><release>17</release></configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><version>3.5.0</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
