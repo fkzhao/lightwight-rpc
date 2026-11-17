@@ -2,6 +2,7 @@ package dev.yumix.rpc.server;
 
 import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
+import dev.yumix.rpc.RpcMethodDescriptor;
 import dev.yumix.rpc.protocol.NsHeadFrame;
 import dev.yumix.rpc.protocol.NsHeadFrameDecoder;
 import dev.yumix.rpc.protocol.NsHeadFrameEncoder;
@@ -27,9 +28,10 @@ import org.slf4j.LoggerFactory;
 import java.net.InetSocketAddress;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -39,14 +41,16 @@ public final class RpcServer implements AutoCloseable {
     private static final long ERROR_METHOD_NOT_FOUND = 1;
     private static final long ERROR_BAD_REQUEST = 2;
     private static final long ERROR_INTERNAL = 3;
+    private static final long ERROR_OVERLOADED = 4;
 
     private final InetSocketAddress address;
     private final String provider;
     private final int maxBodyLength;
     private final long readIdleMillis;
+    private final boolean logRequests;
     private final EventLoopGroup boss = new NioEventLoopGroup(1, new DefaultThreadFactory("rpc-accept"));
     private final EventLoopGroup ioGroup = new NioEventLoopGroup(0, new DefaultThreadFactory("rpc-io"));
-    private final ExecutorService workers;
+    private final ThreadPoolExecutor workers;
     private final ChannelGroup connections = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Map<Long, RegisteredMethod<?, ?>> methods = new ConcurrentHashMap<>();
@@ -58,23 +62,47 @@ public final class RpcServer implements AutoCloseable {
 
     public RpcServer(InetSocketAddress address, String provider, int workerThreads,
                      int maxBodyLength, long readIdleMillis) {
+        this(address, provider, workerThreads, maxBodyLength, readIdleMillis, true);
+    }
+
+    public RpcServer(InetSocketAddress address, String provider, int workerThreads,
+                     int maxBodyLength, long readIdleMillis, boolean logRequests) {
+        this(address, provider, workerThreads, maxBodyLength, readIdleMillis, logRequests, 4_096);
+    }
+
+    public RpcServer(InetSocketAddress address, String provider, int workerThreads,
+                     int maxBodyLength, long readIdleMillis, boolean logRequests, int workerQueueCapacity) {
         this.address = Objects.requireNonNull(address, "address");
         this.provider = Objects.requireNonNull(provider, "provider");
         if (workerThreads < 1) throw new IllegalArgumentException("workerThreads must be positive");
         if (maxBodyLength < 0) throw new IllegalArgumentException("maxBodyLength must be non-negative");
         if (readIdleMillis < 1) throw new IllegalArgumentException("readIdleMillis must be positive");
+        if (workerQueueCapacity < 1) throw new IllegalArgumentException("workerQueueCapacity must be positive");
         if (provider.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 16) {
             throw new IllegalArgumentException("provider must be at most 16 UTF-8 bytes");
         }
         this.maxBodyLength = maxBodyLength;
         this.readIdleMillis = readIdleMillis;
-        this.workers = Executors.newFixedThreadPool(workerThreads, new DefaultThreadFactory("rpc-worker"));
+        this.logRequests = logRequests;
+        this.workers = new ThreadPoolExecutor(workerThreads, workerThreads, 0, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(workerQueueCapacity), new DefaultThreadFactory("rpc-worker"),
+                new ThreadPoolExecutor.AbortPolicy());
     }
 
     public <Req extends Message, Resp extends Message> RpcServer register(
             long methodId, Parser<Req> requestParser, RpcMethod<Req, Resp> method) {
         Objects.requireNonNull(method, "method");
         return registerWithContext(methodId, requestParser, (request, context) -> method.handle(request));
+    }
+
+    public <Req extends Message, Resp extends Message> RpcServer register(
+            RpcMethodDescriptor<Req, Resp> descriptor, RpcMethod<Req, Resp> method) {
+        return register(descriptor.methodId(), descriptor.requestParser(), method);
+    }
+
+    public <Req extends Message, Resp extends Message> RpcServer registerWithContext(
+            RpcMethodDescriptor<Req, Resp> descriptor, RpcMethodWithContext<Req, Resp> method) {
+        return registerWithContext(descriptor.methodId(), descriptor.requestParser(), method);
     }
 
     public <Req extends Message, Resp extends Message> RpcServer registerWithContext(
@@ -185,8 +213,10 @@ public final class RpcServer implements AutoCloseable {
             long startedAt = System.nanoTime();
             String requestId = Long.toUnsignedString(header.requestId());
             String connectionId = ctx.channel().id().asShortText();
-            LOG.info("RPC request received connection={} requestId={} methodId={} logId={} remote={}",
-                    connectionId, requestId, header.methodId(), header.logId(), ctx.channel().remoteAddress());
+            if (logRequests) {
+                LOG.info("RPC request received connection={} requestId={} methodId={} logId={} remote={}",
+                        connectionId, requestId, header.methodId(), header.logId(), ctx.channel().remoteAddress());
+            }
             RegisteredMethod<?, ?> method = methods.get(header.methodId());
             if (method == null) {
                 LOG.warn("RPC unknown method connection={} requestId={} methodId={}",
@@ -202,8 +232,10 @@ public final class RpcServer implements AutoCloseable {
                     try {
                         Message response = method.invoke(header.body(), rpcContext);
                         respond(ctx, header, response, 0, "");
-                        LOG.info("RPC request completed connection={} requestId={} methodId={} elapsedMs={}",
-                                connectionId, requestId, header.methodId(), elapsedMillis(startedAt));
+                        if (logRequests) {
+                            LOG.info("RPC request completed connection={} requestId={} methodId={} elapsedMs={}",
+                                    connectionId, requestId, header.methodId(), elapsedMillis(startedAt));
+                        }
                     } catch (Exception e) {
                         LOG.warn("RPC request failed connection={} requestId={} methodId={} elapsedMs={}",
                                 connectionId, requestId, header.methodId(), elapsedMillis(startedAt), e);
@@ -211,9 +243,9 @@ public final class RpcServer implements AutoCloseable {
                                 ERROR_BAD_REQUEST, "RPC method failed: " + safeMessage(e));
                     }
                 });
-            } catch (RuntimeException e) {
-                LOG.warn("RPC worker unavailable connection={} requestId={}", connectionId, requestId, e);
-                respond(ctx, header, null, ERROR_INTERNAL, "RPC worker unavailable");
+            } catch (RejectedExecutionException e) {
+                LOG.warn("RPC worker queue full connection={} requestId={}", connectionId, requestId);
+                respond(ctx, header, null, ERROR_OVERLOADED, "RPC server overloaded");
             }
         }
 

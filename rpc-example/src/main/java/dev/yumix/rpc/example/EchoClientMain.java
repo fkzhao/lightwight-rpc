@@ -16,8 +16,8 @@ public final class EchoClientMain {
         String message = args.length > 2 ? args[2] : "Hello, nshead + protobuf!";
         try (RpcClient client = RpcClient.connect(new InetSocketAddress(host, port), "echo-client",
                 3000, 4 * 1024 * 1024)) {
-            EchoResponse response = client.request(EchoServerMain.ECHO_METHOD_ID, 1,
-                    EchoRequest.newBuilder().setMessage(message).build(), EchoResponse.parser())
+            EchoResponse response = client.call(EchoRpc.ECHO,
+                    EchoRequest.newBuilder().setMessage(message).build(), 1)
                     .get(4, TimeUnit.SECONDS);
             System.out.println(response.getMessage());
         }

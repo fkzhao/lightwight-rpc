@@ -2,6 +2,7 @@ package dev.yumix.rpc.client;
 
 import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
+import dev.yumix.rpc.RpcMethodDescriptor;
 import dev.yumix.rpc.protocol.NsHeadFrame;
 import dev.yumix.rpc.protocol.NsHeadFrameDecoder;
 import dev.yumix.rpc.protocol.NsHeadFrameEncoder;
@@ -35,6 +36,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -46,6 +48,7 @@ public final class RpcClient implements AutoCloseable {
     private final InetSocketAddress address;
     private final String provider;
     private final RpcClientConfig config;
+    private final Semaphore inFlightPermits;
     private final EventLoopGroup group;
     private final Bootstrap bootstrap;
     private final ConcurrentMap<Long, Pending<?>> pending = new ConcurrentHashMap<>();
@@ -94,6 +97,7 @@ public final class RpcClient implements AutoCloseable {
         this.address = address;
         this.provider = provider;
         this.config = config;
+        this.inFlightPermits = new Semaphore(config.maxInFlight());
         this.group = new NioEventLoopGroup(1, new DefaultThreadFactory("rpc-client"));
         this.bootstrap = new Bootstrap()
                 .group(group)
@@ -125,23 +129,53 @@ public final class RpcClient implements AutoCloseable {
         }
         byte[] body = request.toByteArray();
         if (body.length > config.maxBodyLength()) throw new IllegalArgumentException("request body exceeds configured limit");
+        if (!inFlightPermits.tryAcquire()) {
+            return CompletableFuture.failedFuture(new RpcException("Too many in-flight RPC requests", null));
+        }
 
-        Pending<Resp> call = registerPending(methodId, logId, responseParser);
-        call.timeout = current.eventLoop().schedule(() -> {
+        Pending<Resp> call = null;
+        try {
+            call = registerPending(methodId, logId, responseParser);
+            Pending<Resp> registered = call;
+            call.timeout = current.eventLoop().schedule(() -> {
+                if (pending.remove(registered.requestId, registered)) {
+                    inFlightPermits.release();
+                    registered.future.completeExceptionally(new TimeoutException(
+                            "RPC timed out after " + config.requestTimeoutMillis() + " ms"));
+                }
+            }, config.requestTimeoutMillis(), TimeUnit.MILLISECONDS);
+            NsHeadFrame frame = new NsHeadFrame((int) call.requestId & 0xffff,
+                    NsHeadFrame.PROTOCOL_VERSION, logId, provider, methodId, call.requestId, body);
+            current.writeAndFlush(frame).addListener(write -> {
+                if (!write.isSuccess() && pending.remove(registered.requestId, registered)) {
+                    inFlightPermits.release();
+                    registered.cancelTimeout();
+                    registered.future.completeExceptionally(new RpcException("Failed to write RPC request", write.cause()));
+                }
+            });
+            return call.future;
+        } catch (RuntimeException e) {
+            if (call == null) {
+                inFlightPermits.release();
+                return CompletableFuture.failedFuture(e);
+            }
             if (pending.remove(call.requestId, call)) {
-                call.future.completeExceptionally(new TimeoutException(
-                        "RPC timed out after " + config.requestTimeoutMillis() + " ms"));
-            }
-        }, config.requestTimeoutMillis(), TimeUnit.MILLISECONDS);
-        NsHeadFrame frame = new NsHeadFrame((int) call.requestId & 0xffff,
-                NsHeadFrame.PROTOCOL_VERSION, logId, provider, methodId, call.requestId, body);
-        current.writeAndFlush(frame).addListener(write -> {
-            if (!write.isSuccess() && pending.remove(call.requestId, call)) {
+                inFlightPermits.release();
                 call.cancelTimeout();
-                call.future.completeExceptionally(new RpcException("Failed to write RPC request", write.cause()));
+                call.future.completeExceptionally(e);
             }
-        });
-        return call.future;
+            return call.future;
+        }
+    }
+
+    public <Req extends Message, Resp extends Message> CompletableFuture<Resp> call(
+            RpcMethodDescriptor<Req, Resp> method, Req request, long logId) {
+        return request(method.methodId(), logId, request, method.responseParser());
+    }
+
+    public <Req extends Message, Resp extends Message> CompletableFuture<Resp> call(
+            RpcMethodDescriptor<Req, Resp> method, Req request) {
+        return call(method, request, 0);
     }
 
     private <Resp extends Message> Pending<Resp> registerPending(long methodId, long logId, Parser<Resp> parser) {
@@ -228,6 +262,7 @@ public final class RpcClient implements AutoCloseable {
     private void failPending(Throwable error) {
         for (Pending<?> call : pending.values()) {
             if (pending.remove(call.requestId, call)) {
+                inFlightPermits.release();
                 call.cancelTimeout();
                 call.future.completeExceptionally(error);
             }
@@ -313,6 +348,7 @@ public final class RpcClient implements AutoCloseable {
             cancelHeartbeat();
             Pending<?> call = client.pending.remove(frame.requestId());
             if (call == null) return;
+            client.inFlightPermits.release();
             call.cancelTimeout();
             if (frame.methodId() != call.methodId || frame.logId() != call.logId) {
                 call.future.completeExceptionally(new RpcException("RPC response header does not match request", null));

@@ -14,7 +14,7 @@ public final class EchoServerMain {
         int port = args.length == 0 ? 9080 : Integer.parseInt(args[0]);
         RpcServer server = new RpcServer(new InetSocketAddress("0.0.0.0", port), "echo-server",
                 Math.max(2, Runtime.getRuntime().availableProcessors()), 4 * 1024 * 1024);
-        server.registerWithContext(ECHO_METHOD_ID, EchoRequest.parser(), EchoService::handle);
+        server.registerWithContext(EchoRpc.ECHO, EchoService::handle);
         Runtime.getRuntime().addShutdownHook(new Thread(server::close));
         server.start();
         server.awaitTermination();

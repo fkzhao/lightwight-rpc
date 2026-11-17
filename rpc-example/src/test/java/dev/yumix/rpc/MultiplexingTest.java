@@ -1,6 +1,7 @@
 package dev.yumix.rpc;
 
 import dev.yumix.rpc.client.RpcClient;
+import dev.yumix.rpc.example.EchoRpc;
 import dev.yumix.rpc.example.proto.EchoRequest;
 import dev.yumix.rpc.example.proto.EchoResponse;
 import dev.yumix.rpc.server.RpcServer;
@@ -23,7 +24,7 @@ final class MultiplexingTest {
         CountDownLatch slowStarted = new CountDownLatch(1);
         CountDownLatch releaseSlow = new CountDownLatch(1);
         RpcServer server = new RpcServer(new InetSocketAddress("127.0.0.1", 0), "test-server", 2, 1024);
-        server.register(1, EchoRequest.parser(), request -> {
+        server.register(EchoRpc.ECHO, request -> {
             if (request.getMessage().equals("slow")) {
                 slowStarted.countDown();
                 if (!releaseSlow.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Slow call was not released");
@@ -32,8 +33,8 @@ final class MultiplexingTest {
         });
         server.start();
         try (RpcClient client = RpcClient.connect(server.localAddress(), "test-client", 10_000, 1024)) {
-            CompletableFuture<EchoResponse> slow = client.request(1, 7,
-                    EchoRequest.newBuilder().setMessage("slow").build(), EchoResponse.parser());
+            CompletableFuture<EchoResponse> slow = client.call(EchoRpc.ECHO,
+                    EchoRequest.newBuilder().setMessage("slow").build(), 7);
             assertTrue(slowStarted.await(3, TimeUnit.SECONDS));
 
             Field field = RpcClient.class.getDeclaredField("nextRequestId");
@@ -43,8 +44,8 @@ final class MultiplexingTest {
             long nextRequestId = sequence.addAndGet(65_535) + 1;
             assertEquals((int) firstRequestId & 0xffff, (int) nextRequestId & 0xffff);
 
-            CompletableFuture<EchoResponse> fast = client.request(1, 7,
-                    EchoRequest.newBuilder().setMessage("fast").build(), EchoResponse.parser());
+            CompletableFuture<EchoResponse> fast = client.call(EchoRpc.ECHO,
+                    EchoRequest.newBuilder().setMessage("fast").build(), 7);
             assertEquals("fast", fast.get(3, TimeUnit.SECONDS).getMessage());
             assertFalse(slow.isDone());
             releaseSlow.countDown();

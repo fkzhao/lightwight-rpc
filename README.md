@@ -1,91 +1,88 @@
 # lightweight-rpc
 
-A small Java 17 RPC framework using Netty, a 44-byte extended nshead header, and Protocol Buffers payloads. It includes a multiplexed asynchronous client, a server with a worker pool, and an Echo example.
+Java 17 SDK for multiplexed RPC over a persistent TCP connection. The wire format is a 44-byte extended nshead v3 header followed by a Protocol Buffers body.
 
-The Java base package and Maven group ID are `dev.yumix.rpc`.
+## Modules
 
-## Requirements
+| Module | Purpose |
+| --- | --- |
+| `rpc-sdk` | Reusable client, server, framing, heartbeat, and reconnect logic |
+| `rpc-example` | Echo protobuf contract and runnable integration examples |
+| `rpc-benchmark` | Server load generator and dedicated benchmark server |
 
-- JDK 17
-- Maven 3.8+
-
-## Build
+Build and install all modules with JDK 17 and Maven 3.8+:
 
 ```bash
-mvn compile
+mvn clean install
 ```
 
-Protocol Buffer Java sources are generated from `src/main/proto` during the Maven build.
+Each module generates Java sources from its own `src/main/proto` files. The reusable JAR is `rpc-sdk/target/rpc-sdk-0.1.0-SNAPSHOT.jar`.
+
+## Use the SDK from another Maven project
+
+```xml
+<dependency>
+  <groupId>dev.yumix.rpc</groupId>
+  <artifactId>rpc-sdk</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+Define the business request and response in your own `.proto` file and generate their Java classes during your Maven build. The example contract is in `rpc-example/src/main/proto/echo.proto`. Use the same method ID and protobuf message types on both sides:
+
+```java
+RpcMethodDescriptor<EchoRequest, EchoResponse> echo =
+        new RpcMethodDescriptor<>(1, EchoRequest.parser(), EchoResponse.parser());
+
+RpcServer server = new RpcServer(new InetSocketAddress("0.0.0.0", 9080),
+        "my-server", 8, 4 * 1024 * 1024);
+server.register(echo, request ->
+        EchoResponse.newBuilder().setMessage(request.getMessage()).build());
+server.start();
+
+try (RpcClient client = RpcClient.connect(new InetSocketAddress("127.0.0.1", 9080),
+        "my-app", RpcClientConfig.defaults(3_000, 4 * 1024 * 1024))) {
+    EchoResponse reply = client.call(echo,
+            EchoRequest.newBuilder().setMessage("hello").build()).get();
+    System.out.println(reply.getMessage());
+}
+```
+
+Keep one `RpcClient` per endpoint and reuse it across calls. `call(...)` is asynchronous; the SDK correlates out-of-order responses by the 64-bit header request ID. Close the client and server during application shutdown. Use `RpcClient.open(...)` when the server may be unavailable at startup; calls fail fast until `isConnected()` becomes true.
+
+The client caps pending calls at 4,096 per connection by default. Supply the eight-argument `RpcClientConfig` constructor to change `maxInFlight`; calls above the limit fail immediately with `RpcException`. The server uses a bounded worker queue of 4,096 tasks by default. Use the seven-argument `RpcServer` constructor to set `workerQueueCapacity`. When the queue is full, the server returns error code `4` (`RPC server overloaded`) without closing the connection. These bounds prevent slow handlers from growing the request backlog indefinitely.
+
+`rpc-sdk` depends on `slf4j-api` but does not force a logging provider. An application can supply its own SLF4J provider.
 
 ## Run the Echo example
 
-Start the server:
+After `mvn install`, start the server in terminal 1:
 
 ```bash
-mvn exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoServerMain
+mvn -f rpc-example/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoServerMain
 ```
 
-Call it from another terminal:
+Run one call in terminal 2:
 
 ```bash
-mvn exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoClientMain -Dexec.args="127.0.0.1 9080 hello"
+mvn -q -f rpc-example/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoClientMain
 ```
 
-## Observe multiplexing on one TCP connection
-
-To see server logs separately, start the server in terminal 1:
+Run the multiplexing client to see four concurrent calls on one connection:
 
 ```bash
-mvn compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoServerMain
+mvn -q -f rpc-example/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingDemoMain
 ```
 
-Run the multiplexing demo in terminal 2. With no arguments it connects to the running Echo server at `127.0.0.1:9080`:
+`MultiplexingDemoMain --standalone` starts its own temporary server instead. The Echo server logs the connection ID, request ID, and completion time for each call. Use the command without Maven's `-q` option on the server so INFO logs remain visible.
+
+To observe automatic reconnection, keep this client running while stopping and restarting the Echo server:
 
 ```bash
-mvn -q compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingDemoMain
+mvn -f rpc-example/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.example.LongConnectionClientMain
 ```
 
-The server logs connection open/close, each request ID, method ID, connection ID, remote address, and completion time. Its Echo handler also logs the request label and delay. All four requests have the same server connection ID and remote port; that remote port matches the client's local port. The completion order differs from the send order.
-
-For both sides in one terminal, explicitly start the embedded server:
-
-```bash
-mvn compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingDemoMain -Dexec.args="--standalone"
-```
-
-The standalone mode starts its own server on a random loopback port. Its requests do not reach a separately running `EchoServerMain`.
-Run the server or standalone demo without Maven's `-q` option so its INFO logs remain visible.
-
-## Wire protocol
-
-Each TCP frame contains the 36-byte nshead base, an 8-byte request ID extension, and then the body. All header integer fields are little-endian. The body length excludes the 44-byte header and is limited by each endpoint's configured `maxBodyLength`.
-
-| Offset | Size | Field | Meaning |
-| ---: | ---: | --- | --- |
-| 0 | 2 | `id` | Low 16 bits of the request ID |
-| 2 | 2 | `version` | Protocol version; currently `3` |
-| 4 | 4 | `log_id` | Caller-supplied trace ID |
-| 8 | 16 | `provider` | UTF-8 caller/server identifier, zero-padded |
-| 24 | 4 | `magic_num` | `0xfb709394` |
-| 28 | 4 | `method_id` | Custom RPC method ID |
-| 32 | 4 | `body_len` | Body length in bytes |
-| 36 | 8 | `request_id` | Full 64-bit request/response correlation ID |
-| 44 | variable | `body` | Protobuf message bytes |
-
-Requests carry the serialized method request directly in the body. Responses carry `RpcResponse` from `rpc_common.proto`; its `payload` is the serialized method response on success, and `error_code` plus `error_message` describe failures. The server echoes the request's header `request_id` in the response header. Version 3 is required on both endpoints and is not wire-compatible with version 2. This project defines its own method routing and response convention; it is not a brpc compatibility implementation.
-
-## Register a method
-
-```java
-server.register(1, EchoRequest.parser(), request ->
-        EchoResponse.newBuilder().setMessage(request.getMessage()).build());
-```
-
-Use `RpcClient.request(methodId, logId, request, responseParser)` to invoke the method. The returned `CompletableFuture` allows multiple outstanding calls over one connection. The client correlates replies by the 64-bit `request_id` in the response header before parsing the response protobuf, so responses may arrive out of order. The nshead `log_id` remains a caller-supplied trace ID.
-
-## Long-lived connections
-
-`RpcClient.connect(...)` establishes the first TCP connection synchronously and then reconnects automatically if it is lost. `RpcClient.open(...)` returns immediately and also retries when the server is unavailable at startup. Use `isConnected()` to check availability; new requests fail fast while disconnected. A request that was in flight when a connection failed completes exceptionally because the server may already have processed it. The client never replays it automatically.
+## Long connection defaults
 
 | Setting | Default |
 | --- | ---: |
@@ -94,18 +91,50 @@ Use `RpcClient.request(methodId, logId, request, responseParser)` to invoke the 
 | PONG timeout | 10 seconds |
 | Server read idle before closing | 90 seconds |
 | Reconnect delay | 500 ms initially, exponential up to 30 seconds, with jitter |
-| RPC request timeout | Supplied as `timeoutMillis` when creating the client |
+| RPC request timeout | Supplied when constructing the client |
+| Maximum pending calls per client connection | 4,096 |
+| Maximum queued server worker tasks | 4,096 |
 
-PING uses `method_id=0`, PONG uses `method_id=0xFFFFFFFF`, and both have an empty body. The server replies to PING on its network thread and echoes the 64-bit header request ID. These method IDs cannot be registered as business methods. TCP keepalive is also enabled. Configure client timeouts with `RpcClientConfig`; the server's optional fifth constructor argument sets its read idle timeout in milliseconds.
+PING uses `method_id=0`; PONG uses `method_id=0xFFFFFFFF`. Both have an empty body and use the v3 header request ID. The server responds on the network thread. Calls interrupted by a disconnect fail and are never replayed automatically because the server may already have processed them. New calls fail fast while disconnected. `RpcClientConfig` configures the client timeouts; the optional fifth `RpcServer` constructor argument sets its read idle timeout in milliseconds.
 
-To observe reconnection, run `EchoServerMain` and keep this client running in another terminal:
+## Server pressure and benchmark tests
+
+The benchmark module has a bounded-concurrency load generator. It reports successful calls per second, errors, and p50/p95/p99 latency. For a separate server process, start:
 
 ```bash
-mvn compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.LongConnectionClientMain
+mvn -f rpc-benchmark/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.benchmark.BenchmarkServerMain
 ```
 
-Stop and restart the Echo server. The client logs disconnection and reconnect attempts, then resumes new calls on the new TCP connection. Calls interrupted by the disconnect fail and are not replayed.
+Then run the benchmark profile in another terminal:
 
-## Protocol definition
+```bash
+mvn -q -f rpc-benchmark/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.benchmark.LoadTestMain -Dexec.args="--profile=benchmark --host=127.0.0.1 --port=9081"
+```
 
-The first 36 bytes follow the field sizes used by the Baidu nshead header. The 8-byte request ID extension, method ID, and response envelope are custom conventions for this RPC framework.
+Run a longer stress profile:
+
+```bash
+mvn -q -f rpc-benchmark/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.benchmark.LoadTestMain -Dexec.args="--profile=stress --host=127.0.0.1 --port=9081"
+```
+
+Options include `--connections`, `--inflight`, `--payload`, `--warmup`, and `--duration`. Omitting `--host` starts an embedded server in the same JVM for a quick local baseline. The separate-process mode is more representative. The test uses closed-loop fixed concurrency; reported latency includes the client, network, and server. Percentiles use 0.1 ms buckets. Run on a stable machine and compare results only under the same settings.
+
+See [`rpc-benchmark/RESULTS.md`](rpc-benchmark/RESULTS.md) for a measured local run and exact reproduction settings.
+
+## Wire protocol
+
+The first 36 bytes follow the nshead field sizes. This project extends that base with an 8-byte request ID. All header integers are little-endian; `body_len` excludes the 44-byte header.
+
+| Offset | Size | Field | Meaning |
+| ---: | ---: | --- | --- |
+| 0 | 2 | `id` | Low 16 bits of the request ID |
+| 2 | 2 | `version` | Protocol version `3` |
+| 4 | 4 | `log_id` | Caller-supplied trace ID |
+| 8 | 16 | `provider` | UTF-8 identifier, zero-padded |
+| 24 | 4 | `magic_num` | `0xfb709394` |
+| 28 | 4 | `method_id` | RPC method or heartbeat control ID |
+| 32 | 4 | `body_len` | Body length in bytes |
+| 36 | 8 | `request_id` | Full 64-bit correlation ID |
+| 44 | variable | `body` | Protobuf message bytes |
+
+Requests carry their method's protobuf directly. Responses carry `RpcResponse` from `rpc_common.proto`, with either a serialized method response or an error. The server echoes the header request ID. Version 3 is not wire-compatible with version 2 or brpc.

@@ -4,7 +4,7 @@ package dev.yumix.rpc.client;
 public record RpcClientConfig(long requestTimeoutMillis, int maxBodyLength,
                               int connectTimeoutMillis, long heartbeatIdleMillis,
                               long heartbeatTimeoutMillis, long reconnectInitialMillis,
-                              long reconnectMaxMillis) {
+                              long reconnectMaxMillis, int maxInFlight) {
     public RpcClientConfig {
         if (requestTimeoutMillis < 1) throw new IllegalArgumentException("requestTimeoutMillis must be positive");
         if (maxBodyLength < 0) throw new IllegalArgumentException("maxBodyLength must be non-negative");
@@ -14,10 +14,19 @@ public record RpcClientConfig(long requestTimeoutMillis, int maxBodyLength,
         if (reconnectInitialMillis < 1 || reconnectMaxMillis < reconnectInitialMillis) {
             throw new IllegalArgumentException("Invalid reconnect interval");
         }
+        if (maxInFlight < 1) throw new IllegalArgumentException("maxInFlight must be positive");
+    }
+
+    public RpcClientConfig(long requestTimeoutMillis, int maxBodyLength,
+                           int connectTimeoutMillis, long heartbeatIdleMillis,
+                           long heartbeatTimeoutMillis, long reconnectInitialMillis,
+                           long reconnectMaxMillis) {
+        this(requestTimeoutMillis, maxBodyLength, connectTimeoutMillis, heartbeatIdleMillis,
+                heartbeatTimeoutMillis, reconnectInitialMillis, reconnectMaxMillis, 4_096);
     }
 
     public static RpcClientConfig defaults(long requestTimeoutMillis, int maxBodyLength) {
         return new RpcClientConfig(requestTimeoutMillis, maxBodyLength,
-                3_000, 30_000, 10_000, 500, 30_000);
+                3_000, 30_000, 10_000, 500, 30_000, 4_096);
     }
 }
