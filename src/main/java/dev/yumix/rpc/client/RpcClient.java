@@ -5,7 +5,6 @@ import com.google.protobuf.Parser;
 import dev.yumix.rpc.protocol.NsHeadFrame;
 import dev.yumix.rpc.protocol.NsHeadFrameDecoder;
 import dev.yumix.rpc.protocol.NsHeadFrameEncoder;
-import dev.yumix.rpc.protocol.RpcRequest;
 import dev.yumix.rpc.protocol.RpcResponse;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
@@ -84,21 +83,17 @@ public final class RpcClient implements AutoCloseable {
         if ((methodId & ~0xffff_ffffL) != 0) throw new IllegalArgumentException("methodId must fit in uint32");
         if ((logId & ~0xffff_ffffL) != 0) throw new IllegalArgumentException("logId must fit in uint32");
         if (!channel.isActive()) return CompletableFuture.failedFuture(new RpcException("RPC channel is closed", null));
+        byte[] body = request.toByteArray();
+        if (body.length > maxBodyLength) throw new IllegalArgumentException("request body exceeds configured limit");
 
         Pending<Resp> call = registerPending(methodId, logId, responseParser);
-        byte[] body = RpcRequest.newBuilder().setRequestId(call.requestId)
-                .setPayload(request.toByteString()).build().toByteArray();
-        if (body.length > maxBodyLength) {
-            pending.remove(call.requestId, call);
-            throw new IllegalArgumentException("request body exceeds configured limit");
-        }
         call.timeout = channel.eventLoop().schedule(() -> {
             if (pending.remove(call.requestId, call)) {
                 call.future.completeExceptionally(new TimeoutException("RPC timed out after " + timeoutMillis + " ms"));
             }
         }, timeoutMillis, TimeUnit.MILLISECONDS);
         NsHeadFrame frame = new NsHeadFrame((int) call.requestId & 0xffff,
-                NsHeadFrame.PROTOCOL_VERSION, logId, provider, methodId, body);
+                NsHeadFrame.PROTOCOL_VERSION, logId, provider, methodId, call.requestId, body);
         channel.writeAndFlush(frame).addListener(write -> {
             if (!write.isSuccess() && pending.remove(call.requestId, call)) {
                 call.cancelTimeout();
@@ -138,33 +133,16 @@ public final class RpcClient implements AutoCloseable {
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, NsHeadFrame frame) {
-            if (frame.version() != NsHeadFrame.PROTOCOL_VERSION) {
-                failPending(new RpcException("Unsupported RPC protocol version: " + frame.version(), null));
-                ctx.close();
-                return;
-            }
-            RpcResponse response;
-            try {
-                response = RpcResponse.parseFrom(frame.body());
-            } catch (Exception e) {
-                failPending(new RpcException("Invalid RPC response", e));
-                ctx.close();
-                return;
-            }
-            if (response.getRequestId() == 0) {
-                failPending(new RpcException("RPC response has no request ID", null));
-                ctx.close();
-                return;
-            }
-            Pending<?> call = client.pending.remove(response.getRequestId());
+            Pending<?> call = client.pending.remove(frame.requestId());
             if (call == null) return;
             call.cancelTimeout();
-            if (frame.id() != ((int) call.requestId & 0xffff)
+            if (frame.version() != NsHeadFrame.PROTOCOL_VERSION
                     || frame.methodId() != call.methodId || frame.logId() != call.logId) {
                 call.future.completeExceptionally(new RpcException("RPC response header does not match request", null));
                 return;
             }
             try {
+                RpcResponse response = RpcResponse.parseFrom(frame.body());
                 if (response.getErrorCode() != 0) {
                     call.future.completeExceptionally(new RpcException(Integer.toUnsignedLong(response.getErrorCode()), response.getErrorMessage()));
                 } else {

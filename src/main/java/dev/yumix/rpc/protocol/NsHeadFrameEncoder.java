@@ -18,6 +18,7 @@ public final class NsHeadFrameEncoder extends MessageToByteEncoder<NsHeadFrame> 
         out.writeIntLE(NsHeadFrame.MAGIC);
         out.writeIntLE((int) frame.methodId());
         out.writeIntLE(frame.body().length);
+        out.writeLongLE(frame.requestId());
         out.writeBytes(frame.body());
     }
 }

@@ -1,6 +1,6 @@
 # lightweight-rpc
 
-A small Java 17 RPC framework using Netty, a 36-byte nshead-style header, and Protocol Buffers payloads. It includes a multiplexed asynchronous client, a server with a worker pool, and an Echo example.
+A small Java 17 RPC framework using Netty, a 44-byte extended nshead header, and Protocol Buffers payloads. It includes a multiplexed asynchronous client, a server with a worker pool, and an Echo example.
 
 The Java base package and Maven group ID are `dev.yumix.rpc`.
 
@@ -58,20 +58,21 @@ Run the server or standalone demo without Maven's `-q` option so its INFO logs r
 
 ## Wire protocol
 
-Each TCP frame contains the following header followed by the body. All integer fields are unsigned and little-endian. The body length is limited by each endpoint's configured `maxBodyLength`.
+Each TCP frame contains the 36-byte nshead base, an 8-byte request ID extension, and then the body. All header integer fields are little-endian. The body length excludes the 44-byte header and is limited by each endpoint's configured `maxBodyLength`.
 
 | Offset | Size | Field | Meaning |
 | ---: | ---: | --- | --- |
 | 0 | 2 | `id` | Low 16 bits of the request ID |
-| 2 | 2 | `version` | Protocol version; currently `2` |
+| 2 | 2 | `version` | Protocol version; currently `3` |
 | 4 | 4 | `log_id` | Caller-supplied trace ID |
 | 8 | 16 | `provider` | UTF-8 caller/server identifier, zero-padded |
 | 24 | 4 | `magic_num` | `0xfb709394` |
 | 28 | 4 | `method_id` | Custom RPC method ID |
 | 32 | 4 | `body_len` | Body length in bytes |
-| 36 | variable | `body` | Protobuf envelope bytes |
+| 36 | 8 | `request_id` | Full 64-bit request/response correlation ID |
+| 44 | variable | `body` | Protobuf message bytes |
 
-Requests carry `RpcRequest` from `rpc_common.proto`, with a 64-bit `request_id` and a `payload` containing the serialized method request. Responses carry `RpcResponse` with the same `request_id`; its `payload` is the serialized method response on success, and `error_code` plus `error_message` describe failures. The 36-byte nshead header is unchanged. Protocol version 2 is required on both endpoints; version 1 peers are not compatible with this envelope. This project defines its own method routing and response convention; it is not a brpc compatibility implementation.
+Requests carry the serialized method request directly in the body. Responses carry `RpcResponse` from `rpc_common.proto`; its `payload` is the serialized method response on success, and `error_code` plus `error_message` describe failures. The server echoes the request's header `request_id` in the response header. Version 3 is required on both endpoints and is not wire-compatible with version 2. This project defines its own method routing and response convention; it is not a brpc compatibility implementation.
 
 ## Register a method
 
@@ -80,8 +81,8 @@ server.register(1, EchoRequest.parser(), request ->
         EchoResponse.newBuilder().setMessage(request.getMessage()).build());
 ```
 
-Use `RpcClient.request(methodId, logId, request, responseParser)` to invoke the method. The returned `CompletableFuture` allows multiple outstanding calls over one connection. The client correlates replies by the 64-bit `request_id` in the protobuf envelope, so responses may arrive out of order. The nshead `log_id` remains a caller-supplied trace ID.
+Use `RpcClient.request(methodId, logId, request, responseParser)` to invoke the method. The returned `CompletableFuture` allows multiple outstanding calls over one connection. The client correlates replies by the 64-bit `request_id` in the response header before parsing the response protobuf, so responses may arrive out of order. The nshead `log_id` remains a caller-supplied trace ID.
 
 ## Protocol definition
 
-The nshead layout follows the field sizes used by the Baidu nshead header. This project's method ID and response envelope are custom conventions for this RPC framework.
+The first 36 bytes follow the field sizes used by the Baidu nshead header. The 8-byte request ID extension, method ID, and response envelope are custom conventions for this RPC framework.

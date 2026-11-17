@@ -5,17 +5,10 @@ package dev.yumix.rpc;
 option java_package = "dev.yumix.rpc.protocol";
 option java_multiple_files = true;
 
-// Version 2 wraps every method request with a 64-bit correlation ID.
-message RpcRequest {
-  fixed64 request_id = 1;
-  bytes payload = 2;
-}
-
 // Every successful response carries the serialized method response in payload.
 // Errors use a non-zero code and a human-readable message.
 message RpcResponse {
   bytes payload = 1;
   uint32 error_code = 2;
   string error_message = 3;
-  fixed64 request_id = 4;
 }

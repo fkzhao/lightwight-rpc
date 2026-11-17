@@ -5,7 +5,6 @@ import com.google.protobuf.Parser;
 import dev.yumix.rpc.protocol.NsHeadFrame;
 import dev.yumix.rpc.protocol.NsHeadFrameDecoder;
 import dev.yumix.rpc.protocol.NsHeadFrameEncoder;
-import dev.yumix.rpc.protocol.RpcRequest;
 import dev.yumix.rpc.protocol.RpcResponse;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
@@ -129,30 +128,8 @@ public final class RpcServer implements AutoCloseable {
 
         @Override
         protected void channelRead0(io.netty.channel.ChannelHandlerContext ctx, NsHeadFrame header) {
-            if (header.version() != NsHeadFrame.PROTOCOL_VERSION) {
-                LOG.warn("RPC unsupported version={} connection={}",
-                        header.version(), ctx.channel().id().asShortText());
-                ctx.close();
-                return;
-            }
-            RpcRequest request;
-            try {
-                request = RpcRequest.parseFrom(header.body());
-                if (request.getRequestId() == 0 || header.id() != ((int) request.getRequestId() & 0xffff)) {
-                    LOG.warn("RPC invalid request ID connection={} headerId={} requestId={}",
-                            ctx.channel().id().asShortText(), header.id(),
-                            Long.toUnsignedString(request.getRequestId()));
-                    ctx.close();
-                    return;
-                }
-            } catch (Exception e) {
-                LOG.warn("RPC invalid request envelope connection={} remote={}",
-                        ctx.channel().id().asShortText(), ctx.channel().remoteAddress(), e);
-                ctx.close();
-                return;
-            }
             long startedAt = System.nanoTime();
-            String requestId = Long.toUnsignedString(request.getRequestId());
+            String requestId = Long.toUnsignedString(header.requestId());
             String connectionId = ctx.channel().id().asShortText();
             LOG.info("RPC request received connection={} requestId={} methodId={} logId={} remote={}",
                     connectionId, requestId, header.methodId(), header.logId(), ctx.channel().remoteAddress());
@@ -160,44 +137,44 @@ public final class RpcServer implements AutoCloseable {
             if (method == null) {
                 LOG.warn("RPC unknown method connection={} requestId={} methodId={}",
                         connectionId, requestId, header.methodId());
-                respond(ctx, header, request.getRequestId(), null,
+                respond(ctx, header, null,
                         ERROR_METHOD_NOT_FOUND, "Unknown methodId: " + header.methodId());
                 return;
             }
-            RpcContext rpcContext = new RpcContext(request.getRequestId(), ctx.channel().id().asShortText(),
+            RpcContext rpcContext = new RpcContext(header.requestId(), ctx.channel().id().asShortText(),
                     ctx.channel().localAddress(), ctx.channel().remoteAddress());
             try {
                 workers.execute(() -> {
                     try {
-                        Message response = method.invoke(request.getPayload().toByteArray(), rpcContext);
-                        respond(ctx, header, request.getRequestId(), response, 0, "");
+                        Message response = method.invoke(header.body(), rpcContext);
+                        respond(ctx, header, response, 0, "");
                         LOG.info("RPC request completed connection={} requestId={} methodId={} elapsedMs={}",
                                 connectionId, requestId, header.methodId(), elapsedMillis(startedAt));
                     } catch (Exception e) {
                         LOG.warn("RPC request failed connection={} requestId={} methodId={} elapsedMs={}",
                                 connectionId, requestId, header.methodId(), elapsedMillis(startedAt), e);
-                        respond(ctx, header, request.getRequestId(), null,
+                        respond(ctx, header, null,
                                 ERROR_BAD_REQUEST, "RPC method failed: " + safeMessage(e));
                     }
                 });
             } catch (RuntimeException e) {
                 LOG.warn("RPC worker unavailable connection={} requestId={}", connectionId, requestId, e);
-                respond(ctx, header, request.getRequestId(), null, ERROR_INTERNAL, "RPC worker unavailable");
+                respond(ctx, header, null, ERROR_INTERNAL, "RPC worker unavailable");
             }
         }
 
-        private void respond(io.netty.channel.ChannelHandlerContext ctx, NsHeadFrame request, long requestId,
+        private void respond(io.netty.channel.ChannelHandlerContext ctx, NsHeadFrame request,
                              Message message, long code, String error) {
-            RpcResponse.Builder response = RpcResponse.newBuilder().setRequestId(requestId)
+            RpcResponse.Builder response = RpcResponse.newBuilder()
                     .setErrorCode((int) code).setErrorMessage(error);
             if (message != null) response.setPayload(message.toByteString());
             byte[] body = response.build().toByteArray();
             if (body.length > maxBodyLength) {
-                body = RpcResponse.newBuilder().setRequestId(requestId).setErrorCode((int) ERROR_INTERNAL)
+                body = RpcResponse.newBuilder().setErrorCode((int) ERROR_INTERNAL)
                         .setErrorMessage("Response exceeds configured body limit").build().toByteArray();
             }
             ctx.writeAndFlush(new NsHeadFrame(request.id(), NsHeadFrame.PROTOCOL_VERSION,
-                    request.logId(), provider, request.methodId(), body));
+                    request.logId(), provider, request.methodId(), request.requestId(), body));
         }
 
         @Override
