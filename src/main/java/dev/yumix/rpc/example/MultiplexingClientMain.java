@@ -29,6 +29,7 @@ public final class MultiplexingClientMain {
                 new Job("C-medium", 700),
                 new Job("D-quick", 300));
         long startedAt = System.nanoTime();
+        System.out.println("Connecting to RPC server at " + address);
         try (RpcClient client = RpcClient.connect(address, "demo-client", 5000, 1024 * 1024)) {
             System.out.printf("One TCP connection: client %s -> server %s%n",
                     client.localAddress(), client.remoteAddress());

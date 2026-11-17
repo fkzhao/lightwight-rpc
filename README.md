@@ -39,21 +39,21 @@ To see server logs separately, start the server in terminal 1:
 mvn compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoServerMain
 ```
 
-Run the concurrent client in terminal 2:
+Run the multiplexing demo in terminal 2. With no arguments it connects to the running Echo server at `127.0.0.1:9080`:
 
 ```bash
-mvn -q compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingClientMain
+mvn -q compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingDemoMain
 ```
 
 The server logs connection open/close, each request ID, method ID, connection ID, remote address, and completion time. Its Echo handler also logs the request label and delay. All four requests have the same server connection ID and remote port; that remote port matches the client's local port. The completion order differs from the send order.
 
-For both sides in one terminal, run the standalone demo:
+For both sides in one terminal, explicitly start the embedded server:
 
 ```bash
-mvn compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingDemoMain
+mvn compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingDemoMain -Dexec.args="--standalone"
 ```
 
-The standalone demo opens one real TCP connection on a loopback port and sends the same four requests immediately.
+The standalone mode starts its own server on a random loopback port. Its requests do not reach a separately running `EchoServerMain`.
 Run the server or standalone demo without Maven's `-q` option so its INFO logs remain visible.
 
 ## Wire protocol
