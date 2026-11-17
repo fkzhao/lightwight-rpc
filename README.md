@@ -28,7 +28,7 @@ mvn exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoServerMain
 Call it from another terminal:
 
 ```bash
-mvn exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoClientMain -Dexec.args="127.0.0.1 9000 hello"
+mvn exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoClientMain -Dexec.args="127.0.0.1 9080 hello"
 ```
 
 ## Wire protocol
@@ -37,16 +37,16 @@ Each TCP frame contains the following header followed by the body. All integer f
 
 | Offset | Size | Field | Meaning |
 | ---: | ---: | --- | --- |
-| 0 | 2 | `id` | Request/response correlation ID |
-| 2 | 2 | `version` | Protocol version; currently `1` |
+| 0 | 2 | `id` | Low 16 bits of the request ID |
+| 2 | 2 | `version` | Protocol version; currently `2` |
 | 4 | 4 | `log_id` | Caller-supplied trace ID |
 | 8 | 16 | `provider` | UTF-8 caller/server identifier, zero-padded |
 | 24 | 4 | `magic_num` | `0xfb709394` |
 | 28 | 4 | `method_id` | Custom RPC method ID |
 | 32 | 4 | `body_len` | Body length in bytes |
-| 36 | variable | `body` | Protobuf message bytes |
+| 36 | variable | `body` | Protobuf envelope bytes |
 
-Requests carry the method's request protobuf directly. Responses carry the common `RpcResponse` protobuf from `rpc_common.proto`; its `payload` is the serialized method response on success, and `error_code` plus `error_message` describe failures. This project defines its own method routing and response convention; it is not a brpc compatibility implementation.
+Requests carry `RpcRequest` from `rpc_common.proto`, with a 64-bit `request_id` and a `payload` containing the serialized method request. Responses carry `RpcResponse` with the same `request_id`; its `payload` is the serialized method response on success, and `error_code` plus `error_message` describe failures. The 36-byte nshead header is unchanged. Protocol version 2 is required on both endpoints; version 1 peers are not compatible with this envelope. This project defines its own method routing and response convention; it is not a brpc compatibility implementation.
 
 ## Register a method
 
@@ -55,7 +55,7 @@ server.register(1, EchoRequest.parser(), request ->
         EchoResponse.newBuilder().setMessage(request.getMessage()).build());
 ```
 
-Use `RpcClient.request(methodId, logId, request, responseParser)` to invoke the method. The returned `CompletableFuture` allows multiple outstanding calls over one connection. The client correlates replies by the 16-bit nshead `id`; at most 65,536 requests may be in flight on a connection.
+Use `RpcClient.request(methodId, logId, request, responseParser)` to invoke the method. The returned `CompletableFuture` allows multiple outstanding calls over one connection. The client correlates replies by the 64-bit `request_id` in the protobuf envelope, so responses may arrive out of order. The nshead `log_id` remains a caller-supplied trace ID.
 
 ## Protocol definition
 

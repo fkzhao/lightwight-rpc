@@ -5,6 +5,7 @@ import com.google.protobuf.Parser;
 import dev.yumix.rpc.protocol.NsHeadFrame;
 import dev.yumix.rpc.protocol.NsHeadFrameDecoder;
 import dev.yumix.rpc.protocol.NsHeadFrameEncoder;
+import dev.yumix.rpc.protocol.RpcRequest;
 import dev.yumix.rpc.protocol.RpcResponse;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
@@ -85,6 +86,12 @@ public final class RpcServer implements AutoCloseable {
         current.closeFuture().sync();
     }
 
+    public InetSocketAddress localAddress() {
+        Channel current = serverChannel;
+        if (current == null) throw new IllegalStateException("server is not started");
+        return (InetSocketAddress) current.localAddress();
+    }
+
     @Override
     public void close() {
         Channel current = serverChannel;
@@ -96,37 +103,51 @@ public final class RpcServer implements AutoCloseable {
 
     private final class RequestHandler extends io.netty.channel.SimpleChannelInboundHandler<NsHeadFrame> {
         @Override
-        protected void channelRead0(io.netty.channel.ChannelHandlerContext ctx, NsHeadFrame request) {
-            if (request.version() != NsHeadFrame.PROTOCOL_VERSION) {
-                respond(ctx, request, null, ERROR_BAD_REQUEST, "Unsupported protocol version: " + request.version());
+        protected void channelRead0(io.netty.channel.ChannelHandlerContext ctx, NsHeadFrame header) {
+            if (header.version() != NsHeadFrame.PROTOCOL_VERSION) {
+                ctx.close();
                 return;
             }
-            RegisteredMethod<?, ?> method = methods.get(request.methodId());
+            RpcRequest request;
+            try {
+                request = RpcRequest.parseFrom(header.body());
+                if (request.getRequestId() == 0 || header.id() != ((int) request.getRequestId() & 0xffff)) {
+                    ctx.close();
+                    return;
+                }
+            } catch (Exception e) {
+                ctx.close();
+                return;
+            }
+            RegisteredMethod<?, ?> method = methods.get(header.methodId());
             if (method == null) {
-                respond(ctx, request, null, ERROR_METHOD_NOT_FOUND, "Unknown methodId: " + request.methodId());
+                respond(ctx, header, request.getRequestId(), null,
+                        ERROR_METHOD_NOT_FOUND, "Unknown methodId: " + header.methodId());
                 return;
             }
             try {
                 workers.execute(() -> {
                     try {
-                        Message response = method.invoke(request.body());
-                        respond(ctx, request, response, 0, "");
+                        Message response = method.invoke(request.getPayload().toByteArray());
+                        respond(ctx, header, request.getRequestId(), response, 0, "");
                     } catch (Exception e) {
-                        respond(ctx, request, null, ERROR_BAD_REQUEST, "RPC method failed: " + safeMessage(e));
+                        respond(ctx, header, request.getRequestId(), null,
+                                ERROR_BAD_REQUEST, "RPC method failed: " + safeMessage(e));
                     }
                 });
             } catch (RuntimeException e) {
-                respond(ctx, request, null, ERROR_INTERNAL, "RPC worker unavailable");
+                respond(ctx, header, request.getRequestId(), null, ERROR_INTERNAL, "RPC worker unavailable");
             }
         }
 
-        private void respond(io.netty.channel.ChannelHandlerContext ctx, NsHeadFrame request,
+        private void respond(io.netty.channel.ChannelHandlerContext ctx, NsHeadFrame request, long requestId,
                              Message message, long code, String error) {
-            RpcResponse.Builder response = RpcResponse.newBuilder().setErrorCode((int) code).setErrorMessage(error);
+            RpcResponse.Builder response = RpcResponse.newBuilder().setRequestId(requestId)
+                    .setErrorCode((int) code).setErrorMessage(error);
             if (message != null) response.setPayload(message.toByteString());
             byte[] body = response.build().toByteArray();
             if (body.length > maxBodyLength) {
-                body = RpcResponse.newBuilder().setErrorCode((int) ERROR_INTERNAL)
+                body = RpcResponse.newBuilder().setRequestId(requestId).setErrorCode((int) ERROR_INTERNAL)
                         .setErrorMessage("Response exceeds configured body limit").build().toByteArray();
             }
             ctx.writeAndFlush(new NsHeadFrame(request.id(), NsHeadFrame.PROTOCOL_VERSION,

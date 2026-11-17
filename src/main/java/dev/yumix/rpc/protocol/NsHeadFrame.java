@@ -6,7 +6,7 @@ import java.util.Objects;
 public record NsHeadFrame(int id, int version, long logId, String provider, long methodId, byte[] body) {
     public static final int HEADER_LENGTH = 36;
     public static final int MAGIC = 0xfb709394;
-    public static final int PROTOCOL_VERSION = 1;
+    public static final int PROTOCOL_VERSION = 2;
 
     public NsHeadFrame {
         if ((id & ~0xffff) != 0) throw new IllegalArgumentException("id must fit in uint16");

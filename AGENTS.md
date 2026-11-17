@@ -5,4 +5,5 @@
 - Use Maven and keep Protocol Buffer definitions under `src/main/proto`.
 - Keep all source comments, documentation, and README content in English.
 - Preserve the documented 36-byte little-endian nshead frame layout unless the protocol is intentionally revised.
+- Use protocol version 2 envelopes and their 64-bit request IDs for multiplexed calls.
 - Keep network event loops free of blocking application handlers; execute RPC methods on the server worker pool.

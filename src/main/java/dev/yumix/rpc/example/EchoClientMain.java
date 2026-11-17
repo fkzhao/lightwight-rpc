@@ -12,7 +12,7 @@ public final class EchoClientMain {
 
     public static void main(String[] args) throws Exception {
         String host = args.length > 0 ? args[0] : "127.0.0.1";
-        int port = args.length > 1 ? Integer.parseInt(args[1]) : 9000;
+        int port = args.length > 1 ? Integer.parseInt(args[1]) : 9080;
         String message = args.length > 2 ? args[2] : "Hello, nshead + protobuf!";
         try (RpcClient client = RpcClient.connect(new InetSocketAddress(host, port), "echo-client",
                 3000, 4 * 1024 * 1024)) {
