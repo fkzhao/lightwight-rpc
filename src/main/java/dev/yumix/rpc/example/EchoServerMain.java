@@ -1,7 +1,6 @@
 package dev.yumix.rpc.example;
 
 import dev.yumix.rpc.example.proto.EchoRequest;
-import dev.yumix.rpc.example.proto.EchoResponse;
 import dev.yumix.rpc.server.RpcServer;
 
 import java.net.InetSocketAddress;
@@ -15,11 +14,9 @@ public final class EchoServerMain {
         int port = args.length == 0 ? 9080 : Integer.parseInt(args[0]);
         RpcServer server = new RpcServer(new InetSocketAddress("0.0.0.0", port), "echo-server",
                 Math.max(2, Runtime.getRuntime().availableProcessors()), 4 * 1024 * 1024);
-        server.register(ECHO_METHOD_ID, EchoRequest.parser(), request ->
-                EchoResponse.newBuilder().setMessage(request.getMessage()).build());
+        server.registerWithContext(ECHO_METHOD_ID, EchoRequest.parser(), EchoService::handle);
         Runtime.getRuntime().addShutdownHook(new Thread(server::close));
         server.start();
-        System.out.println("Echo RPC server listening on port " + port);
         server.awaitTermination();
     }
 }

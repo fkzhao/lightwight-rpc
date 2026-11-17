@@ -33,13 +33,28 @@ mvn exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoClientMain -Dexec.args=
 
 ## Observe multiplexing on one TCP connection
 
-Run the standalone demo:
+To see server logs separately, start the server in terminal 1:
 
 ```bash
-mvn -q compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingDemoMain
+mvn compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoServerMain
 ```
 
-The demo opens one real TCP connection on a loopback port and sends four requests immediately. Each `SEND` and `RECV` line prints the same client and server socket addresses. The server prints the same Netty connection ID for every request, along with a distinct 64-bit request ID. The requests have different delays, so the completion order differs from the send order.
+Run the concurrent client in terminal 2:
+
+```bash
+mvn -q compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingClientMain
+```
+
+The server logs connection open/close, each request ID, method ID, connection ID, remote address, and completion time. Its Echo handler also logs the request label and delay. All four requests have the same server connection ID and remote port; that remote port matches the client's local port. The completion order differs from the send order.
+
+For both sides in one terminal, run the standalone demo:
+
+```bash
+mvn compile exec:java -Dexec.mainClass=dev.yumix.rpc.example.MultiplexingDemoMain
+```
+
+The standalone demo opens one real TCP connection on a loopback port and sends the same four requests immediately.
+Run the server or standalone demo without Maven's `-q` option so its INFO logs remain visible.
 
 ## Wire protocol
 

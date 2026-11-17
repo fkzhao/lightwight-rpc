@@ -16,6 +16,8 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
 import java.util.Map;
@@ -26,6 +28,7 @@ import java.util.concurrent.Executors;
 
 /** Netty based nshead + protobuf RPC server. Register methods before start(). */
 public final class RpcServer implements AutoCloseable {
+    private static final Logger LOG = LoggerFactory.getLogger(RpcServer.class);
     private static final long ERROR_METHOD_NOT_FOUND = 1;
     private static final long ERROR_BAD_REQUEST = 2;
     private static final long ERROR_INTERNAL = 3;
@@ -84,6 +87,7 @@ public final class RpcServer implements AutoCloseable {
                     }
                 });
         serverChannel = bootstrap.bind(address).syncUninterruptibly().channel();
+        LOG.info("RPC server listening on {}", serverChannel.localAddress());
         return this;
     }
 
@@ -110,8 +114,24 @@ public final class RpcServer implements AutoCloseable {
 
     private final class RequestHandler extends io.netty.channel.SimpleChannelInboundHandler<NsHeadFrame> {
         @Override
+        public void channelActive(io.netty.channel.ChannelHandlerContext ctx) {
+            LOG.info("RPC connection opened connection={} local={} remote={}",
+                    ctx.channel().id().asShortText(), ctx.channel().localAddress(), ctx.channel().remoteAddress());
+            ctx.fireChannelActive();
+        }
+
+        @Override
+        public void channelInactive(io.netty.channel.ChannelHandlerContext ctx) {
+            LOG.info("RPC connection closed connection={} remote={}",
+                    ctx.channel().id().asShortText(), ctx.channel().remoteAddress());
+            ctx.fireChannelInactive();
+        }
+
+        @Override
         protected void channelRead0(io.netty.channel.ChannelHandlerContext ctx, NsHeadFrame header) {
             if (header.version() != NsHeadFrame.PROTOCOL_VERSION) {
+                LOG.warn("RPC unsupported version={} connection={}",
+                        header.version(), ctx.channel().id().asShortText());
                 ctx.close();
                 return;
             }
@@ -119,15 +139,27 @@ public final class RpcServer implements AutoCloseable {
             try {
                 request = RpcRequest.parseFrom(header.body());
                 if (request.getRequestId() == 0 || header.id() != ((int) request.getRequestId() & 0xffff)) {
+                    LOG.warn("RPC invalid request ID connection={} headerId={} requestId={}",
+                            ctx.channel().id().asShortText(), header.id(),
+                            Long.toUnsignedString(request.getRequestId()));
                     ctx.close();
                     return;
                 }
             } catch (Exception e) {
+                LOG.warn("RPC invalid request envelope connection={} remote={}",
+                        ctx.channel().id().asShortText(), ctx.channel().remoteAddress(), e);
                 ctx.close();
                 return;
             }
+            long startedAt = System.nanoTime();
+            String requestId = Long.toUnsignedString(request.getRequestId());
+            String connectionId = ctx.channel().id().asShortText();
+            LOG.info("RPC request received connection={} requestId={} methodId={} logId={} remote={}",
+                    connectionId, requestId, header.methodId(), header.logId(), ctx.channel().remoteAddress());
             RegisteredMethod<?, ?> method = methods.get(header.methodId());
             if (method == null) {
+                LOG.warn("RPC unknown method connection={} requestId={} methodId={}",
+                        connectionId, requestId, header.methodId());
                 respond(ctx, header, request.getRequestId(), null,
                         ERROR_METHOD_NOT_FOUND, "Unknown methodId: " + header.methodId());
                 return;
@@ -139,12 +171,17 @@ public final class RpcServer implements AutoCloseable {
                     try {
                         Message response = method.invoke(request.getPayload().toByteArray(), rpcContext);
                         respond(ctx, header, request.getRequestId(), response, 0, "");
+                        LOG.info("RPC request completed connection={} requestId={} methodId={} elapsedMs={}",
+                                connectionId, requestId, header.methodId(), elapsedMillis(startedAt));
                     } catch (Exception e) {
+                        LOG.warn("RPC request failed connection={} requestId={} methodId={} elapsedMs={}",
+                                connectionId, requestId, header.methodId(), elapsedMillis(startedAt), e);
                         respond(ctx, header, request.getRequestId(), null,
                                 ERROR_BAD_REQUEST, "RPC method failed: " + safeMessage(e));
                     }
                 });
             } catch (RuntimeException e) {
+                LOG.warn("RPC worker unavailable connection={} requestId={}", connectionId, requestId, e);
                 respond(ctx, header, request.getRequestId(), null, ERROR_INTERNAL, "RPC worker unavailable");
             }
         }
@@ -165,8 +202,14 @@ public final class RpcServer implements AutoCloseable {
 
         @Override
         public void exceptionCaught(io.netty.channel.ChannelHandlerContext ctx, Throwable cause) {
+            LOG.warn("RPC connection failed connection={} remote={}",
+                    ctx.channel().id().asShortText(), ctx.channel().remoteAddress(), cause);
             ctx.close();
         }
+    }
+
+    private static long elapsedMillis(long startedAt) {
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
     }
 
     private static String safeMessage(Exception e) {
