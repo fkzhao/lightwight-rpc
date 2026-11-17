@@ -90,7 +90,19 @@ Run one call in terminal 2:
 mvn -q -f rpc-example/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoClientMain
 ```
 
-For annotation scanning, start `EchoScanServerMain` in place of `EchoServerMain`.
+To see subpackage scanning, start `EchoScanServerMain` in place of `EchoServerMain`:
+
+```bash
+mvn -f rpc-example/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoScanServerMain
+```
+
+The anchor is in `dev.yumix.rpc.example`. The scanner registers both `EchoService` in that package and `NestedEchoService` in `dev.yumix.rpc.example.nested`. The latter has `@RpcService` on the class and `@RpcRoute(methodId = EchoRpc.NESTED_ECHO_ID)` on its handler. Call it from another terminal:
+
+```bash
+mvn -q -f rpc-example/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.example.NestedEchoClientMain
+```
+
+The client prints `nested:hello`. The server logs `Registered 2 RPC routes from package dev.yumix.rpc.example`.
 
 Run the multiplexing client to see four concurrent calls on one connection:
 

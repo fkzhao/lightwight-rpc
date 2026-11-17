@@ -21,11 +21,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class ScanRegistrationTest {
     @Test
-    void findsAnnotatedHandlerInAnchorPackage() throws Exception {
+    void findsAnnotatedHandlersInAnchorPackageAndSubpackage() throws Exception {
         try (RpcServer server = server()) {
             server.scanAndRegister(EchoScanServerMain.class).start();
             try (RpcClient client = RpcClient.connect(server.localAddress(), "test-client", 2_000, 1024)) {
                 assertEquals("hello", client.call(EchoRpc.ECHO,
+                        EchoRequest.newBuilder().setMessage("hello").build())
+                        .get(2, TimeUnit.SECONDS).getMessage());
+                assertEquals("nested:hello", client.call(EchoRpc.NESTED_ECHO,
                         EchoRequest.newBuilder().setMessage("hello").build())
                         .get(2, TimeUnit.SECONDS).getMessage());
             }
