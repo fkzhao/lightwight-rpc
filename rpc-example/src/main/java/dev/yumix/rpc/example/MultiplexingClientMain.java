@@ -1,8 +1,8 @@
 package dev.yumix.rpc.example;
 
-import dev.yumix.rpc.client.RpcClient;
+import dev.yumix.rpc.client.RpcClientPool;
+import dev.yumix.rpc.client.RpcPoolStats;
 import dev.yumix.rpc.example.proto.EchoRequest;
-import dev.yumix.rpc.example.proto.EchoResponse;
 
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
@@ -30,9 +30,12 @@ public final class MultiplexingClientMain {
                 new Job("D-quick", 300));
         long startedAt = System.nanoTime();
         System.out.println("Connecting to RPC server at " + address);
-        try (RpcClient client = RpcClient.connect(address, "demo-client", 5000, 1024 * 1024)) {
+        try (RpcClientPool pool = RpcClientPool.builder(address, "demo-client")
+                .connections(1).maxBodyLength(1024 * 1024).build()) {
+            pool.ready().get(10, TimeUnit.SECONDS);
+            RpcPoolStats.Connection connection = pool.stats().connections().get(0);
             System.out.printf("One TCP connection: client %s -> server %s%n",
-                    client.localAddress(), client.remoteAddress());
+                    connection.localAddress(), connection.remoteAddress());
             List<CompletableFuture<Void>> observations = new ArrayList<>();
             ConcurrentLinkedQueue<String> completionOrder = new ConcurrentLinkedQueue<>();
             AtomicInteger completionNumber = new AtomicInteger();
@@ -41,16 +44,15 @@ public final class MultiplexingClientMain {
                 Job job = jobs.get(i);
                 System.out.printf("%4d ms  SEND   #%d  request=%s  delay=%d ms  connection=%s -> %s%n",
                         elapsedMs(startedAt), i + 1, job.name(), job.delayMs(),
-                        client.localAddress(), client.remoteAddress());
+                        connection.localAddress(), connection.remoteAddress());
                 EchoRequest request = EchoRequest.newBuilder()
                         .setMessage(job.name()).setDelayMs(job.delayMs()).build();
-                CompletableFuture<Void> observation = client.request(EchoServerMain.ECHO_METHOD_ID, 42,
-                                request, EchoResponse.parser())
+                CompletableFuture<Void> observation = pool.call(EchoRpc.ECHO, request, 42)
                         .thenAccept(response -> {
                             completionOrder.add(response.getMessage());
                             System.out.printf("%4d ms  RECV   #%d  response=%s  connection=%s -> %s%n",
                                     elapsedMs(startedAt), completionNumber.incrementAndGet(),
-                                    response.getMessage(), client.localAddress(), client.remoteAddress());
+                                    response.getMessage(), connection.localAddress(), connection.remoteAddress());
                         });
                 observations.add(observation);
             }

@@ -1,6 +1,7 @@
 package dev.yumix.rpc.benchmark;
 
 import dev.yumix.rpc.client.RpcClient;
+import dev.yumix.rpc.client.RpcClientPool;
 import dev.yumix.rpc.example.EchoRpc;
 import dev.yumix.rpc.example.proto.EchoRequest;
 import dev.yumix.rpc.example.proto.EchoResponse;
@@ -20,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAccumulator;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Function;
 
 /** Closed-loop server load generator with bounded concurrency and latency percentiles. */
 public final class LoadTestMain {
@@ -31,7 +33,8 @@ public final class LoadTestMain {
     public static void main(String[] args) throws Exception {
         Options options = Options.parse(args);
         RpcServer embeddedServer = null;
-        List<RpcClient> clients = new ArrayList<>();
+        List<RpcClient> legacyClients = new ArrayList<>();
+        RpcClientPool pool = null;
         try {
             InetSocketAddress address;
             if (options.host() == null) {
@@ -44,17 +47,40 @@ public final class LoadTestMain {
             } else {
                 address = new InetSocketAddress(options.host(), options.port());
             }
-            for (int i = 0; i < options.connections(); i++) {
-                clients.add(RpcClient.connect(address, "bench-client", 5_000, MAX_BODY_LENGTH));
+            List<Function<EchoRequest, CompletableFuture<EchoResponse>>> callers = new ArrayList<>();
+            if (options.client().equals("pool")) {
+                RpcClientPool activePool = RpcClientPool.builder(address, "bench-client")
+                        .connections(options.connections())
+                        .maxInFlightPerConnection(options.inflightPerConnection())
+                        .maxBodyLength(MAX_BODY_LENGTH).build();
+                pool = activePool;
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                while (pool.stats().readyConnections() < options.connections()) {
+                    if (System.nanoTime() > deadline) {
+                        throw new IllegalStateException("RPC pool did not open all connections");
+                    }
+                    Thread.sleep(20);
+                }
+                for (int i = 0; i < options.connections(); i++) {
+                    callers.add(request -> activePool.call(EchoRpc.ECHO, request));
+                }
+            } else {
+                for (int i = 0; i < options.connections(); i++) {
+                    RpcClient client = RpcClient.connect(address, "bench-client", 5_000, MAX_BODY_LENGTH);
+                    legacyClients.add(client);
+                    callers.add(request -> client.call(EchoRpc.ECHO, request));
+                }
             }
-            runLoad(options, address, clients);
+            runLoad(options, address, callers);
         } finally {
-            for (RpcClient client : clients) client.close();
+            if (pool != null) pool.close();
+            for (RpcClient client : legacyClients) client.close();
             if (embeddedServer != null) embeddedServer.close();
         }
     }
 
-    private static void runLoad(Options options, InetSocketAddress address, List<RpcClient> clients)
+    private static void runLoad(Options options, InetSocketAddress address,
+                                List<Function<EchoRequest, CompletableFuture<EchoResponse>>> callers)
             throws InterruptedException {
         EchoRequest request = EchoRequest.newBuilder()
                 .setMessage("x".repeat(options.payloadBytes())).build();
@@ -67,18 +93,18 @@ public final class LoadTestMain {
         long measureAt = startedAt + TimeUnit.SECONDS.toNanos(options.warmupSeconds());
         long stopAt = measureAt + TimeUnit.SECONDS.toNanos(options.durationSeconds());
 
-        System.out.printf("profile=%s mode=%s server=%s connections=%d inflightPerConnection=%d "
+        System.out.printf("profile=%s mode=%s client=%s server=%s connections=%d inflightPerConnection=%d "
                         + "maxInflight=%d messageBytes=%d warmupSeconds=%d durationSeconds=%d%n",
-                options.profile(), options.host() == null ? "embedded" : "remote", address,
+                options.profile(), options.host() == null ? "embedded" : "remote", options.client(), address,
                 options.connections(), options.inflightPerConnection(), slots,
                 options.payloadBytes(), options.warmupSeconds(), options.durationSeconds());
         System.out.printf("java=%s processors=%d%n", System.getProperty("java.version"),
                 Runtime.getRuntime().availableProcessors());
 
         try {
-            for (RpcClient client : clients) {
+            for (Function<EchoRequest, CompletableFuture<EchoResponse>> caller : callers) {
                 for (int i = 0; i < options.inflightPerConnection(); i++) {
-                    launchers.execute(new Slot(client, request, measureAt, stopAt, metrics, finished, launchers));
+                    launchers.execute(new Slot(caller, request, measureAt, stopAt, metrics, finished, launchers));
                 }
             }
             long waitSeconds = options.warmupSeconds() + options.durationSeconds() + 15L;
@@ -103,7 +129,7 @@ public final class LoadTestMain {
     }
 
     private static final class Slot implements Runnable {
-        private final RpcClient client;
+        private final Function<EchoRequest, CompletableFuture<EchoResponse>> caller;
         private final EchoRequest request;
         private final long measureAt;
         private final long stopAt;
@@ -111,9 +137,10 @@ public final class LoadTestMain {
         private final CountDownLatch finished;
         private final ExecutorService launchers;
 
-        private Slot(RpcClient client, EchoRequest request, long measureAt, long stopAt,
+        private Slot(Function<EchoRequest, CompletableFuture<EchoResponse>> caller,
+                     EchoRequest request, long measureAt, long stopAt,
                      Metrics metrics, CountDownLatch finished, ExecutorService launchers) {
-            this.client = client;
+            this.caller = caller;
             this.request = request;
             this.measureAt = measureAt;
             this.stopAt = stopAt;
@@ -131,7 +158,7 @@ public final class LoadTestMain {
             }
             CompletableFuture<EchoResponse> call;
             try {
-                call = client.call(EchoRpc.ECHO, request);
+                call = caller.apply(request);
             } catch (RuntimeException e) {
                 record(sentAt, false);
                 launchers.execute(this);
@@ -177,7 +204,7 @@ public final class LoadTestMain {
         }
     }
 
-    private record Options(String profile, String host, int port, int connections,
+    private record Options(String profile, String client, String host, int port, int connections,
                            int inflightPerConnection, int payloadBytes, int warmupSeconds,
                            int durationSeconds, int serverWorkers) {
         private static Options parse(String[] args) {
@@ -190,7 +217,7 @@ public final class LoadTestMain {
                 values.put(arg.substring(2, separator), arg.substring(separator + 1));
             }
             for (String name : values.keySet()) {
-                if (!List.of("profile", "host", "port", "connections", "inflight", "payload",
+                if (!List.of("profile", "client", "host", "port", "connections", "inflight", "payload",
                         "warmup", "duration", "server-workers").contains(name)) {
                     throw new IllegalArgumentException("Unknown option: " + name);
                 }
@@ -200,12 +227,16 @@ public final class LoadTestMain {
                 throw new IllegalArgumentException("profile must be benchmark or stress");
             }
             boolean stress = profile.equals("stress");
+            String client = values.getOrDefault("client", "pool");
+            if (!client.equals("pool") && !client.equals("legacy")) {
+                throw new IllegalArgumentException("client must be pool or legacy");
+            }
             int connections = number(values, "connections", stress ? 8 : 4, 1, 256);
             int inflight = number(values, "inflight", stress ? 128 : 32, 1, 4096);
             if ((long) connections * inflight > 16_384) {
                 throw new IllegalArgumentException("maxInflight must not exceed 16384");
             }
-            return new Options(profile, values.get("host"), number(values, "port", 9081, 1, 65535),
+            return new Options(profile, client, values.get("host"), number(values, "port", 9081, 1, 65535),
                     connections, inflight, number(values, "payload", stress ? 1024 : 128, 1, 1_000_000),
                     number(values, "warmup", 3, 0, 600), number(values, "duration", stress ? 30 : 10, 1, 600),
                     number(values, "server-workers", Runtime.getRuntime().availableProcessors(), 1, 1024));

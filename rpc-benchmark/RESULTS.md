@@ -2,6 +2,21 @@
 
 Run date: 2026-11-17 (Asia/Shanghai). These are single-run local measurements, not production capacity guarantees.
 
+The measurements in this document before the SDK pool comparison use the earlier `RpcClient` transport. Use `--client=legacy` to reproduce them. The load generator now defaults to `RpcClientPool`.
+
+## SDK pool comparison
+
+Run date: 2026-11-17 (Asia/Shanghai). The pool and legacy clients used the same separate benchmark server process on loopback, 8 server workers, OpenJDK 17.0.20.1, and the profiles below. Each row is one run; results may vary between runs.
+
+| Profile | Client | Connections | In flight per connection | Payload | Warmup | Measurement | Success | Errors | QPS | p50 | p95 | p99 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| benchmark | pool | 4 | 32 | 128 bytes | 2 s | 5 s | 526,541 | 0 | 105,308.2 | 1.20 ms | 1.30 ms | 1.40 ms |
+| benchmark | legacy | 4 | 32 | 128 bytes | 2 s | 5 s | 494,337 | 0 | 98,867.4 | 1.20 ms | 1.40 ms | 1.50 ms |
+| stress | pool | 8 | 128 | 1,024 bytes | 2 s | 10 s | 1,032,167 | 0 | 103,216.7 | 9.90 ms | 10.70 ms | 11.60 ms |
+| stress | legacy | 8 | 128 | 1,024 bytes | 2 s | 10 s | 941,960 | 0 | 94,196.0 | 10.80 ms | 11.50 ms | 12.00 ms |
+
+The SDK pool showed no throughput or p99 regression in these same-process comparisons. These measurements include client scheduling, loopback TCP, protobuf serialization, and server work; they do not isolate server-only capacity.
+
 ## Environment and method
 
 - Java: OpenJDK 17.0.20.1
@@ -29,8 +44,8 @@ mvn -q -f rpc-benchmark/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.benchma
 Run the two profiles in another terminal:
 
 ```bash
-mvn -q -f rpc-benchmark/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.benchmark.LoadTestMain -Dexec.args="--profile=benchmark --host=127.0.0.1 --port=9081 --connections=4 --inflight=32 --warmup=2 --duration=5 --payload=128"
-mvn -q -f rpc-benchmark/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.benchmark.LoadTestMain -Dexec.args="--profile=stress --host=127.0.0.1 --port=9081 --connections=8 --inflight=128 --warmup=2 --duration=10 --payload=1024"
+mvn -q -f rpc-benchmark/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.benchmark.LoadTestMain -Dexec.args="--client=legacy --profile=benchmark --host=127.0.0.1 --port=9081 --connections=4 --inflight=32 --warmup=2 --duration=5 --payload=128"
+mvn -q -f rpc-benchmark/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.benchmark.LoadTestMain -Dexec.args="--client=legacy --profile=stress --host=127.0.0.1 --port=9081 --connections=8 --inflight=128 --warmup=2 --duration=10 --payload=1024"
 ```
 
 The results include client scheduling, loopback networking, protobuf serialization, and server execution. Repeat runs under the same settings to compare changes. For isolated server capacity, run the load generator on a separate host and monitor server CPU, memory, and network use.
@@ -91,5 +106,5 @@ Run the client in another terminal, after setting `RPC_BENCH_CP` there as well:
 
 ```bash
 read -r RPC_BENCH_CP < /tmp/rpc-benchmark-classpath.txt
-java -Dorg.slf4j.simpleLogger.defaultLogLevel=error -cp "${RPC_BENCH_CP}:rpc-benchmark/target/classes" dev.yumix.rpc.benchmark.LoadTestMain --profile=benchmark --host=127.0.0.1 --port=9081 --connections=8 --inflight=64 --payload=1 --warmup=5 --duration=30
+java -Dorg.slf4j.simpleLogger.defaultLogLevel=error -cp "${RPC_BENCH_CP}:rpc-benchmark/target/classes" dev.yumix.rpc.benchmark.LoadTestMain --client=legacy --profile=benchmark --host=127.0.0.1 --port=9081 --connections=8 --inflight=64 --payload=1 --warmup=5 --duration=30
 ```

@@ -1,6 +1,6 @@
 package dev.yumix.rpc.client;
 
-public final class RpcException extends RuntimeException {
+public class RpcException extends RuntimeException {
     private final long errorCode;
 
     public RpcException(long errorCode, String message) {

@@ -1,6 +1,6 @@
 # SDK-managed connection pool and multiplexing
 
-Status: proposal for review. This document describes the next SDK iteration; the proposed builder and state APIs are not implemented yet.
+Status: implemented. This document describes the SDK connection pool, failure behavior, and handler scanning contract.
 
 ## Assessment of the current implementation
 
@@ -12,7 +12,7 @@ The current client exposes a positional configuration record, creates an event l
 
 Applications create one long-lived `RpcClientPool` per remote endpoint and share it across threads. The pool manages persistent TCP connections and their Netty I/O thread pool. Connection count and I/O thread count are separate settings; concurrent RPC calls do not consume one thread each. The default uses one connection and one I/O thread; every call on that connection is multiplexed. The application supplies its protobuf messages, method descriptor, endpoint, and provider name. It does not allocate request IDs, send heartbeats, schedule reconnects, or maintain a response map.
 
-Proposed single-endpoint API:
+Single-endpoint API:
 
 ```java
 RpcClientPool pool = RpcClientPool.builder(new InetSocketAddress("127.0.0.1", 9080), "order-service")
@@ -28,17 +28,17 @@ CompletableFuture<EchoResponse> reply = pool.call(EchoRpc.ECHO,
 // Keep the pool for later calls and close it during application shutdown.
 ```
 
-`build()` starts connection attempts asynchronously. A call made before the first connection is ready can wait in the bounded SDK queue. Each call to `pool.ready()` returns a future that completes when at least one connection is ready or fails when the reconnect threshold is reached; a later call can wait for recovery. `pool.state()` and `pool.stats()` expose snapshots for health checks and diagnostics. Existing `RpcClient` entry points retain their current fail-fast behavior while sharing the refactored transport components; new integrations use `RpcClientPool` for bounded reconnect waiting.
+`build()` starts connection attempts asynchronously. A call made before the first connection is ready can wait in the bounded SDK queue. Each call to `pool.ready()` returns a future that completes when at least one connection is ready or fails when the reconnect threshold is reached; a later call can wait for recovery. `pool.state()` and `pool.stats()` expose snapshots for health checks and diagnostics. Existing `RpcClient` entry points retain their current fail-fast behavior; new integrations use `RpcClientPool` for bounded reconnect waiting.
 
-The builder adds named settings for response timeout, per-dial connect timeout, connection wait timeout, maximum reconnect attempts, queued-call count and byte limits, heartbeat idle time, PONG timeout, reconnect backoff, maximum body length, maximum in-flight calls per connection, connection count, I/O thread count, and completion executor. Proposed defaults are three failed reconnect cycles, a 1,024-call and 16 MiB unsent queue, 15-second connection wait timeout, 3-second response timeout, 3-second per-dial connect timeout, 30-second idle before PING, 10-second PONG timeout, 500 ms to 30-second reconnect backoff with jitter, and 4,096 in-flight calls per connection. The default I/O thread count is the smaller of the connection count and available processors.
+The builder adds named settings for response timeout, per-dial connect timeout, connection wait timeout, maximum reconnect attempts, queued-call count and byte limits, heartbeat idle time, PONG timeout, reconnect backoff, maximum body length, maximum in-flight calls per connection, connection count, I/O thread count, and completion executor. Defaults are three failed reconnect cycles, a 1,024-call and 16 MiB unsent queue, 15-second connection wait timeout, 3-second response timeout, 3-second per-dial connect timeout, 30-second idle before PING, 10-second PONG timeout, 500 ms to 30-second reconnect backoff with jitter, and 4,096 in-flight calls per connection. The default I/O thread count is the smaller of the connection count and available processors.
 
-`RpcServer.register(RpcMethodDescriptor, handler)` remains the server entry point. The server continues to run application handlers on its bounded worker pool and echo the request ID in each response. An optional server builder can replace positional constructors without changing the handler contract.
+`RpcServer.register(RpcMethodDescriptor, handler)` remains available. The server continues to run application handlers on its bounded worker pool and echo the request ID in each response.
 
 ## Server handler discovery
 
 The server supports two registration modes. The existing `register(...)` and `registerWithContext(...)` calls stay available for explicit registration. The new `scanAndRegister(AnchorClass.class)` mode searches the anchor class's package and its subpackages for annotated handlers, then registers them before `start()` binds the port. Passing an anchor class avoids guessing the caller's package from a stack trace or scanning the entire classpath.
 
-Proposed scanned handler:
+Scanned handler:
 
 ```java
 // EchoRpc.ECHO_ID is a public static final long constant shared with the client descriptor.
@@ -75,9 +75,9 @@ flowchart LR
 ```
 
 - `RpcClientPool` owns the public lifecycle and typed call API. One pool owns a Netty event loop group, sized for its connections and shared by them. It also owns a bounded queue for calls that have not been written to a channel.
-- `ConnectionSupervisor` owns each channel's `DISCONNECTED -> CONNECTING -> READY -> BACKOFF` transitions, heartbeat, reconnect timer, and close handling. `CLOSED` is terminal. Only one connect attempt and one reconnect timer may exist per channel. When all channels are down, one pool-level reconnect cycle tries to restore at least one; a cycle with no ready channel counts as one failed attempt.
-- `RpcConnection` owns a Netty channel and its pending-request registry. A replacement channel gets a new connection generation. The pool is ready when at least one channel is ready.
-- `RpcClientPool` allocates nonzero 64-bit request IDs across its connections. `PendingRequestRegistry` reserves capacity, stores the parser and deadline, and performs exactly-once terminal cleanup. Terminal paths are response, timeout, write failure, cancellation, disconnect, and pool close.
+- The pool supervisor tracks connection state, heartbeat, reconnect timer, and close handling. `CLOSED` is terminal. Only one pool-level connect attempt and one reconnect timer run at once. A failed dial while no channels are ready counts toward the reconnect threshold.
+- Each connection generation owns a Netty channel and a pending-request map. A replacement channel gets a new map. The pool is ready when at least one channel is ready.
+- `RpcClientPool` allocates nonzero 64-bit request IDs across its connections. The pending map stores the parser and deadline and performs exactly-once terminal cleanup. Terminal paths are response, timeout, write failure, cancellation, disconnect, and pool close.
 - The existing codec keeps the 44-byte little-endian nshead v3 header and protobuf response envelope. No wire-format revision is proposed.
 
 When `connectionCount` is greater than one, the SDK selects a ready channel with the fewest in-flight calls. Each channel remains independently multiplexed. With the default count of one, concurrent calls use the same TCP connection and can complete out of order.
@@ -103,7 +103,7 @@ The response timeout starts after a call is sent. A call accepted while disconne
 
 ## Delivery and verification
 
-1. Add `RpcClientPool` with a builder, readiness/state APIs, a bounded unsent-call queue, and connection supervision. Preserve the existing `RpcClient` API and its fail-fast behavior using shared lower-level transport components.
+1. Add `RpcClientPool` with a builder, readiness/state APIs, a bounded unsent-call queue, and connection supervision. Preserve the existing `RpcClient` API and its fail-fast behavior.
 2. Add configurable connection and I/O thread counts, reconnect failure threshold, and completion executor. Keep the default at one connection.
 3. Add `@RpcService`, `@RpcRoute`, and `scanAndRegister(...)` as an optional server registration mode. Update the Echo example to show both manual and scanned registration.
 4. Update `rpc-example` so its long-connection and multiplexing clients only configure and call the SDK; neither example contains transport logic.

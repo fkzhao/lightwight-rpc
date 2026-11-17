@@ -1,6 +1,6 @@
 package dev.yumix.rpc.example;
 
-import dev.yumix.rpc.client.RpcClient;
+import dev.yumix.rpc.client.RpcClientPool;
 import dev.yumix.rpc.example.proto.EchoRequest;
 import dev.yumix.rpc.example.proto.EchoResponse;
 
@@ -14,11 +14,11 @@ public final class EchoClientMain {
         String host = args.length > 0 ? args[0] : "127.0.0.1";
         int port = args.length > 1 ? Integer.parseInt(args[1]) : 9080;
         String message = args.length > 2 ? args[2] : "Hello, nshead + protobuf!";
-        try (RpcClient client = RpcClient.connect(new InetSocketAddress(host, port), "echo-client",
-                3000, 4 * 1024 * 1024)) {
-            EchoResponse response = client.call(EchoRpc.ECHO,
+        try (RpcClientPool pool = RpcClientPool.builder(new InetSocketAddress(host, port), "echo-client")
+                .build()) {
+            EchoResponse response = pool.call(EchoRpc.ECHO,
                     EchoRequest.newBuilder().setMessage(message).build(), 1)
-                    .get(4, TimeUnit.SECONDS);
+                    .get(20, TimeUnit.SECONDS);
             System.out.println(response.getMessage());
         }
     }

@@ -40,17 +40,39 @@ server.register(echo, request ->
         EchoResponse.newBuilder().setMessage(request.getMessage()).build());
 server.start();
 
-try (RpcClient client = RpcClient.connect(new InetSocketAddress("127.0.0.1", 9080),
-        "my-app", RpcClientConfig.defaults(3_000, 4 * 1024 * 1024))) {
-    EchoResponse reply = client.call(echo,
+try (RpcClientPool pool = RpcClientPool.builder(new InetSocketAddress("127.0.0.1", 9080),
+        "my-app").connections(1).build()) {
+    EchoResponse reply = pool.call(echo,
             EchoRequest.newBuilder().setMessage("hello").build()).get();
     System.out.println(reply.getMessage());
 }
 ```
 
-Keep one `RpcClient` per endpoint and reuse it across calls. `call(...)` is asynchronous; the SDK correlates out-of-order responses by the 64-bit header request ID. Close the client and server during application shutdown. Use `RpcClient.open(...)` when the server may be unavailable at startup; calls fail fast until `isConnected()` becomes true.
+Keep one `RpcClientPool` per endpoint and share it across threads. `build()` starts connecting in the background. `call(...)` is asynchronous; the SDK correlates out-of-order responses by the 64-bit header request ID. Close the pool and server during application shutdown. `pool.ready()` returns a future that completes when at least one connection is ready. The earlier `RpcClient` API remains available for integrations that need its fail-fast behavior.
 
-The client caps pending calls at 4,096 per connection by default. Supply the eight-argument `RpcClientConfig` constructor to change `maxInFlight`; calls above the limit fail immediately with `RpcException`. The server uses a bounded worker queue of 4,096 tasks by default. Use the seven-argument `RpcServer` constructor to set `workerQueueCapacity`. When the queue is full, the server returns error code `4` (`RPC server overloaded`) without closing the connection. These bounds prevent slow handlers from growing the request backlog indefinitely.
+The pool caps pending calls at 4,096 per connection and its unsent wait queue at 1,024 calls or 16 MiB by default. Configure these with `maxInFlightPerConnection(...)`, `maxQueuedCalls(...)`, and `maxQueuedBytes(...)`. Calls above a ready connection's in-flight limit fail with `LocalOverloadException`. Calls accepted while every connection is down wait for reconnection; after three consecutive failed dials they fail with `ConnectionUnavailableException`. Background reconnect continues so a later call can succeed. Written calls interrupted by a disconnect fail with `OutcomeUnknownException` and are never replayed. The server uses a bounded worker queue of 4,096 tasks by default. Its seven-argument constructor sets `workerQueueCapacity`; a full queue returns error code `4` without closing the connection.
+
+The pool also offers named settings for connection count, I/O threads, connect timeout, response timeout, connection wait timeout, heartbeat, and reconnect backoff. `state()`, `stats()`, and `addStateListener(...)` expose connection health. User future completions run on a configurable executor, outside Netty I/O threads by default.
+
+## Scan and register server handlers
+
+Manual registration remains available. To discover handlers in an anchor class's package and its subpackages, annotate public service classes and methods, then scan before `start()`:
+
+```java
+@RpcService
+public final class OrderService {
+    @RpcRoute(methodId = ORDER_METHOD_ID)
+    public OrderResponse handle(OrderRequest request, RpcContext context) {
+        return OrderResponse.newBuilder().setId(request.getId()).build();
+    }
+}
+
+RpcServer server = new RpcServer(address, "order-server", 8, 4 * 1024 * 1024);
+server.scanAndRegister(OrderServerMain.class);
+server.start();
+```
+
+`@RpcRoute` uses the same method ID as the client descriptor. Route methods accept a protobuf request, optionally followed by `RpcContext`, and return a protobuf response. Public static methods need no instance; instance methods use a public no-argument constructor. `scanAndRegister(anchor, factory)` can supply instances from a dependency injection container. Duplicate IDs and invalid signatures fail before binding the port. See `EchoScanServerMain` for a runnable example.
 
 `rpc-sdk` depends on `slf4j-api` but does not force a logging provider. An application can supply its own SLF4J provider.
 
@@ -67,6 +89,8 @@ Run one call in terminal 2:
 ```bash
 mvn -q -f rpc-example/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.example.EchoClientMain
 ```
+
+For annotation scanning, start `EchoScanServerMain` in place of `EchoServerMain`.
 
 Run the multiplexing client to see four concurrent calls on one connection:
 
@@ -91,11 +115,14 @@ mvn -f rpc-example/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.example.Long
 | PONG timeout | 10 seconds |
 | Server read idle before closing | 90 seconds |
 | Reconnect delay | 500 ms initially, exponential up to 30 seconds, with jitter |
-| RPC request timeout | Supplied when constructing the client |
-| Maximum pending calls per client connection | 4,096 |
+| Response timeout | 3 seconds after send |
+| Connection wait timeout | 15 seconds before send |
+| Reconnect failure threshold | 3 consecutive failed dials |
+| Maximum pending calls per pool connection | 4,096 |
+| Unsent queue | 1,024 calls and 16 MiB |
 | Maximum queued server worker tasks | 4,096 |
 
-PING uses `method_id=0`; PONG uses `method_id=0xFFFFFFFF`. Both have an empty body and use the v3 header request ID. The server responds on the network thread. Calls interrupted by a disconnect fail and are never replayed automatically because the server may already have processed them. New calls fail fast while disconnected. `RpcClientConfig` configures the client timeouts; the optional fifth `RpcServer` constructor argument sets its read idle timeout in milliseconds.
+PING uses `method_id=0`; PONG uses `method_id=0xFFFFFFFF`. Both have an empty body and use the v3 header request ID. The server responds on the network thread. The optional fifth `RpcServer` constructor argument sets its read idle timeout in milliseconds.
 
 ## Server pressure and benchmark tests
 
@@ -117,7 +144,7 @@ Run a longer stress profile:
 mvn -q -f rpc-benchmark/pom.xml exec:java -Dexec.mainClass=dev.yumix.rpc.benchmark.LoadTestMain -Dexec.args="--profile=stress --host=127.0.0.1 --port=9081"
 ```
 
-Options include `--connections`, `--inflight`, `--payload`, `--warmup`, and `--duration`. Omitting `--host` starts an embedded server in the same JVM for a quick local baseline. The separate-process mode is more representative. The test uses closed-loop fixed concurrency; reported latency includes the client, network, and server. Percentiles use 0.1 ms buckets. Run on a stable machine and compare results only under the same settings.
+The benchmark uses `RpcClientPool` by default. Pass `--client=legacy` to compare with the earlier `RpcClient` implementation. Options include `--connections`, `--inflight`, `--payload`, `--warmup`, and `--duration`. Omitting `--host` starts an embedded server in the same JVM for a quick local baseline. The separate-process mode is more representative. The test uses closed-loop fixed concurrency; reported latency includes the client, network, and server. Percentiles use 0.1 ms buckets. Run on a stable machine and compare results only under the same settings.
 
 See [`rpc-benchmark/RESULTS.md`](rpc-benchmark/RESULTS.md) for a measured local run and exact reproduction settings.
 

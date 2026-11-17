@@ -26,6 +26,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -34,6 +36,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
 /** Netty based nshead + protobuf RPC server. Register methods before start(). */
 public final class RpcServer implements AutoCloseable {
@@ -105,7 +108,7 @@ public final class RpcServer implements AutoCloseable {
         return registerWithContext(descriptor.methodId(), descriptor.requestParser(), method);
     }
 
-    public <Req extends Message, Resp extends Message> RpcServer registerWithContext(
+    public synchronized <Req extends Message, Resp extends Message> RpcServer registerWithContext(
             long methodId, Parser<Req> requestParser, RpcMethodWithContext<Req, Resp> method) {
         if (methodId <= NsHeadFrame.PING_METHOD_ID || methodId >= NsHeadFrame.PONG_METHOD_ID) {
             throw new IllegalArgumentException("methodId is reserved for heartbeat control frames");
@@ -118,7 +121,29 @@ public final class RpcServer implements AutoCloseable {
         return this;
     }
 
-    public RpcServer start() {
+    public RpcServer scanAndRegister(Class<?> anchor) {
+        return scanAndRegister(anchor, RpcServiceScanner::instantiate);
+    }
+
+    public synchronized RpcServer scanAndRegister(Class<?> anchor, Function<Class<?>, Object> instanceFactory) {
+        if (closed.get() || serverChannel != null) {
+            throw new IllegalStateException("Scan RPC routes before starting the server");
+        }
+        List<RpcServiceScanner.Route> routes = RpcServiceScanner.scan(anchor, instanceFactory);
+        Map<Long, RegisteredMethod<?, ?>> discovered = new HashMap<>();
+        for (RpcServiceScanner.Route route : routes) {
+            if (methods.containsKey(route.methodId()) || discovered.putIfAbsent(route.methodId(),
+                    new RegisteredMethod<>(route.parser(), route.handler())) != null) {
+                throw new IllegalArgumentException("Duplicate RPC method ID " + route.methodId()
+                        + " from " + route.source());
+            }
+        }
+        methods.putAll(discovered);
+        LOG.info("Registered {} RPC routes from package {}", routes.size(), anchor.getPackageName());
+        return this;
+    }
+
+    public synchronized RpcServer start() {
         if (closed.get()) throw new IllegalStateException("server is closed");
         if (serverChannel != null) throw new IllegalStateException("server already started");
         ServerBootstrap bootstrap = new ServerBootstrap()
